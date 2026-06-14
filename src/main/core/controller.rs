@@ -1,15 +1,18 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use rand::SeedableRng;
-use rand_xoshiro::Xoshiro256PlusPlus;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::util::time::TimeParts;
 
 use crate::core::configuration::ConfigOptions;
+use crate::core::distributed::{
+    DistributedControlClient, DistributedPacketExchangeBackend, DistributedPacketExchangeContext,
+    DistributedSynchronizer, NoopRemotePacketExchange, RemotePacketExchange, ShardId,
+};
 use crate::core::manager::{Manager, ManagerConfig};
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
@@ -22,6 +25,10 @@ pub struct Controller<'a> {
 
     // the simulator should attempt to end immediately after this time
     end_time: EmulatedTime,
+
+    // set only for distributed shard child processes launched by the parent process
+    distributed_ipc_socket_dir: Option<PathBuf>,
+    distributed_control: Option<Box<dyn DistributedSynchronizer>>,
 }
 
 impl<'a> Controller<'a> {
@@ -34,11 +41,29 @@ impl<'a> Controller<'a> {
             config,
             sim_config: Some(sim_config),
             end_time,
+            distributed_ipc_socket_dir: None,
+            distributed_control: None,
         }
     }
 
+    pub fn new_distributed_shard(
+        sim_config: SimConfig,
+        config: &'a ConfigOptions,
+        ipc_socket_dir: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let current_shard = ShardId(config.experimental.distributed_shard_id.unwrap());
+        let distributed_control =
+            DistributedControlClient::connect(&ipc_socket_dir, current_shard)?;
+
+        Ok(Self {
+            distributed_ipc_socket_dir: Some(ipc_socket_dir),
+            distributed_control: Some(Box::new(distributed_control)),
+            ..Self::new(sim_config, config)
+        })
+    }
+
     pub fn run(mut self) -> anyhow::Result<()> {
-        let mut sim_config = self.sim_config.take().unwrap();
+        let sim_config = self.sim_config.take().unwrap();
 
         let status_logger = self.config.general.progress.unwrap().then(|| {
             let state = ShadowStatusBarState::new(self.end_time);
@@ -51,13 +76,12 @@ impl<'a> Controller<'a> {
             }
         });
 
-        let manager_config = ManagerConfig {
-            random: Xoshiro256PlusPlus::from_rng(&mut sim_config.random),
-            ip_assignment: sim_config.ip_assignment,
-            routing_info: sim_config.routing_info,
-            host_bandwidths: sim_config.host_bandwidths,
-            hosts: sim_config.hosts,
-        };
+        let current_shard = ShardId(self.config.experimental.distributed_shard_id.unwrap());
+        let remote_packet_exchange = self.remote_packet_exchange(current_shard)?;
+        self.wait_for_distributed_peers()?;
+
+        let manager_config =
+            ManagerConfig::from_sim_config(sim_config, current_shard, remote_packet_exchange);
 
         let manager = Manager::new(manager_config, &self, self.config, self.end_time)
             .context("Failed to initialize the manager")?;
@@ -74,23 +98,69 @@ impl<'a> Controller<'a> {
 
         Ok(())
     }
+
+    fn remote_packet_exchange(
+        &self,
+        current_shard: ShardId,
+    ) -> anyhow::Result<Box<dyn RemotePacketExchange>> {
+        let Some(socket_dir) = self.distributed_ipc_socket_dir.as_ref() else {
+            return Ok(Box::new(NoopRemotePacketExchange));
+        };
+
+        let context = DistributedPacketExchangeContext::external(
+            DistributedPacketExchangeBackend::UnixSocket,
+            socket_dir,
+        )?;
+        Ok(context.build_exchange(current_shard)?)
+    }
+
+    fn wait_for_distributed_peers(&self) -> anyhow::Result<()> {
+        let Some(control) = self.distributed_control.as_ref() else {
+            return Ok(());
+        };
+
+        let start = std::time::Instant::now();
+        control.wait()?;
+        worker::with_global_sim_stats(|stats| {
+            stats.record_distributed_barrier_wait(start.elapsed())
+        });
+        Ok(())
+    }
 }
 
 /// Controller methods that are accessed by the manager.
 pub trait SimController {
+    fn remote_packet_send_complete(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn manager_finished_current_round(
         &self,
         min_next_event_time: EmulatedTime,
-    ) -> Option<(EmulatedTime, EmulatedTime)>;
+    ) -> anyhow::Result<Option<(EmulatedTime, EmulatedTime)>>;
 }
 
 impl SimController for Controller<'_> {
+    fn remote_packet_send_complete(&self) -> anyhow::Result<()> {
+        self.wait_for_distributed_peers()
+    }
+
     fn manager_finished_current_round(
         &self,
         min_next_event_time: EmulatedTime,
-    ) -> Option<(EmulatedTime, EmulatedTime)> {
-        // TODO: once we get multiple managers, we have to block them here until they have all
-        // notified us that they are finished
+    ) -> anyhow::Result<Option<(EmulatedTime, EmulatedTime)>> {
+        let min_next_event_time = match self.distributed_control.as_ref() {
+            Some(control) => {
+                let start = std::time::Instant::now();
+                let min_next_event_time =
+                    control.wait_for_global_min_next_event(min_next_event_time)?;
+                worker::with_global_sim_stats(|stats| {
+                    stats.record_distributed_barrier_wait(start.elapsed())
+                });
+                min_next_event_time
+            }
+            None => min_next_event_time,
+        };
 
         let runahead = worker::WORKER_SHARED
             .borrow()
@@ -108,7 +178,7 @@ impl SimController for Controller<'_> {
         let new_end = std::cmp::min(new_end, self.end_time);
 
         let continue_running = new_start < new_end;
-        continue_running.then_some((new_start, new_end))
+        Ok(continue_running.then_some((new_start, new_end)))
     }
 }
 

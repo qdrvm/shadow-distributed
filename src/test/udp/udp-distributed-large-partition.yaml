@@ -1,0 +1,54 @@
+general:
+  stop_time: 10
+network:
+  graph:
+    type: 1_gbit_switch
+hosts:
+  client0:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client server0:5678
+      start_time: 2
+  client1:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client server1:5679
+      start_time: 2
+  client2:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client server2:5680
+      start_time: 2
+  client3:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client server3:5681
+      start_time: 2
+  server0:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server 0.0.0.0:5678
+      start_time: 1
+  server1:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server 0.0.0.0:5679
+      start_time: 1
+  server2:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server 0.0.0.0:5680
+      start_time: 1
+  server3:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server 0.0.0.0:5681
+      start_time: 1

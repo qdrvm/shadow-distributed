@@ -18,13 +18,23 @@ impl Event {
     /// A new packet event, which is an event for packets arriving from the Internet. Packet events
     /// do not include packets on localhost.
     pub fn new_packet(packet: PacketRc, time: EmulatedTime, src_host: &Host) -> Self {
+        Self::new_packet_with_meta(packet, time, src_host.id(), src_host.get_new_event_id())
+    }
+
+    /// A new packet event using source metadata that was assigned by the sending host.
+    pub fn new_packet_with_meta(
+        packet: PacketRc,
+        time: EmulatedTime,
+        src_host_id: HostId,
+        src_host_event_id: u64,
+    ) -> Self {
         Self {
             magic: Magic::new(),
             time,
             data: EventData::Packet(PacketEventData {
                 packet,
-                src_host_id: src_host.id(),
-                src_host_event_id: src_host.get_new_event_id(),
+                src_host_id,
+                src_host_event_id,
             }),
             _counter: ObjectCounter::new("Event"),
         }
@@ -52,6 +62,14 @@ impl Event {
     pub fn set_time(&mut self, time: EmulatedTime) {
         self.magic.debug_check();
         self.time = time;
+    }
+
+    pub fn packet_source_metadata(&self) -> Option<(HostId, u64)> {
+        self.magic.debug_check();
+        match &self.data {
+            EventData::Packet(data) => Some((data.src_host_id, data.src_host_event_id)),
+            EventData::Local(_) => None,
+        }
     }
 
     /// The event data.
@@ -151,6 +169,27 @@ impl PartialOrd for PacketEventData {
         }
 
         Some(cmp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_events_order_by_source_host_then_event_id() {
+        let time = EmulatedTime::SIMULATION_START;
+
+        let event_a =
+            Event::new_packet_with_meta(PacketRc::new_ipv4_udp_mock(), time, HostId::from(1), 10);
+        let event_b =
+            Event::new_packet_with_meta(PacketRc::new_ipv4_udp_mock(), time, HostId::from(2), 0);
+        let event_c =
+            Event::new_packet_with_meta(PacketRc::new_ipv4_udp_mock(), time, HostId::from(1), 11);
+
+        assert!(event_a < event_b);
+        assert!(event_a < event_c);
+        assert!(event_c < event_b);
     }
 }
 

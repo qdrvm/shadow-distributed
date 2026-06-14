@@ -7,6 +7,10 @@ if(SHADOW_USE_PERF_TIMERS STREQUAL ON)
   set(RUST_FEATURES "${RUST_FEATURES} perf_timers")
 endif()
 
+if(SHADOW_USE_MPI STREQUAL ON)
+  set(RUST_FEATURES "${RUST_FEATURES} distributed_mpi")
+endif()
+
 if(SHADOW_EXTRA_TESTS STREQUAL ON)
   set(TEST_FEATURES "${TEST_FEATURES} extra_tests")
 endif()

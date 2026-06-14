@@ -454,6 +454,11 @@ impl Packet {
     pub fn iana_protocol(&self) -> IanaProtocol {
         self.data.iana_protocol()
     }
+
+    /// Returns whether this packet was created by the legacy C TCP stack.
+    pub fn is_legacy_tcp(&self) -> bool {
+        matches!(&self.data, Data::LegacyTcp(_))
+    }
 }
 
 /// Stores the IP header information.

@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +15,10 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 
 use super::work::event_queue::EventQueue;
 use crate::core::controller::ShadowStatusBarState;
+use crate::core::distributed::{
+    OutboundRemotePacketBuffer, PartitionMap, RemotePacketDeliveryError, RemotePacketEvent,
+    RemotePacketExchange, RemotePacketExchangeError, ShardId,
+};
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::Bandwidth;
 use crate::core::sim_stats::{LocalSimStats, SharedSimStats};
@@ -350,6 +354,15 @@ impl Worker {
             return;
         };
 
+        let destination_shard = Worker::with(|w| {
+            w.shared
+                .partition_map
+                .shard_for_host(dst_host_id)
+                .unwrap_or_else(|| panic!("No shard owns destination host {dst_host_id:?}"))
+        })
+        .unwrap();
+        let current_shard = Worker::with(|w| w.shared.current_shard).unwrap();
+
         let src_ip = std::net::IpAddr::V4(src_ip);
         let dst_ip = std::net::IpAddr::V4(dst_ip);
 
@@ -389,9 +402,29 @@ impl Worker {
 
         // copy the packet (except the payload) so the dst gets its own header info
         let dst_packet = packetrc.new_copy_inner();
+        let src_host_id = src_host.id();
+        let src_host_event_id = src_host.get_new_event_id();
+
+        if destination_shard != current_shard {
+            let remote_event = RemotePacketEvent::new(
+                deliver_time,
+                src_host_id,
+                src_host_event_id,
+                dst_host_id,
+                &dst_packet,
+            )
+            .unwrap_or_else(|e| panic!("Failed to serialize remote packet: {e}"));
+            Worker::with(|w| w.shared.push_remote_packet(destination_shard, remote_event)).unwrap();
+            return;
+        }
         Worker::with(|w| {
-            w.shared
-                .push_packet_to_host(dst_packet, dst_host_id, deliver_time, src_host)
+            w.shared.push_packet_to_host(
+                dst_packet,
+                dst_host_id,
+                deliver_time,
+                src_host_id,
+                src_host_event_id,
+            )
         })
         .unwrap();
     }
@@ -495,6 +528,9 @@ pub struct WorkerShared {
     pub ip_assignment: IpAssignment<u32>,
     pub routing_info: RoutingInfo<u32>,
     pub host_bandwidths: HashMap<std::net::IpAddr, Bandwidth>,
+    pub current_shard: ShardId,
+    pub partition_map: PartitionMap,
+    pub outbound_remote_packets: OutboundRemotePacketBuffer,
     pub dns: Dns,
     // allows for easy updating of the status bar's state
     pub status_logger_state: Option<Arc<status_bar::Status<ShadowStatusBarState>>>,
@@ -599,11 +635,98 @@ impl WorkerShared {
         packet: PacketRc,
         dst_host_id: HostId,
         time: EmulatedTime,
-        src_host: &Host,
+        src_host_id: HostId,
+        src_host_event_id: u64,
     ) {
-        let event = Event::new_packet(packet, time, src_host);
+        let event = Event::new_packet_with_meta(packet, time, src_host_id, src_host_event_id);
         let event_queue = self.event_queues.get(&dst_host_id).unwrap();
         event_queue.lock().unwrap().push(event);
+    }
+
+    pub fn push_remote_packet(&self, dst_shard: ShardId, event: RemotePacketEvent) {
+        self.outbound_remote_packets.push(dst_shard, event);
+    }
+
+    pub fn push_inbound_remote_packet(
+        &self,
+        event: RemotePacketEvent,
+    ) -> Result<(), RemotePacketDeliveryError> {
+        let (dst_host_id, event) =
+            event.into_local_event(self.current_shard, &self.partition_map)?;
+        let event_queue = self.event_queues.get(&dst_host_id).unwrap();
+        event_queue.lock().unwrap().push(event);
+        Ok(())
+    }
+
+    pub fn send_remote_packets(
+        &self,
+        exchange: &dyn RemotePacketExchange,
+    ) -> Result<(), RemotePacketExchangeError> {
+        let packets = self.outbound_remote_packets.drain_sorted();
+        let count = packets.len();
+        let payload_bytes = packets
+            .iter()
+            .map(|packet| packet.event.packet_payload_len())
+            .sum();
+        let mut cut_stats: BTreeMap<ShardId, (usize, usize)> = BTreeMap::new();
+        for packet in &packets {
+            let entry = cut_stats.entry(packet.dst_shard).or_default();
+            entry.0 += 1;
+            entry.1 += packet.event.packet_payload_len();
+        }
+
+        exchange.send(packets)?;
+        SIM_STATS.record_remote_packets_sent(count, payload_bytes);
+        for (dst_shard, (count, payload_bytes)) in cut_stats {
+            SIM_STATS.record_remote_packet_cut_sent(
+                self.current_shard.0,
+                dst_shard.0,
+                count,
+                payload_bytes,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn receive_remote_packets(
+        &self,
+        exchange: &dyn RemotePacketExchange,
+    ) -> Result<Option<EmulatedTime>, RemotePacketExchangeError> {
+        let packets = exchange.receive(self.current_shard)?;
+        let next_event_time = packets.iter().map(|x| x.deliver_time).min();
+        let count = packets.len();
+        let payload_bytes = packets
+            .iter()
+            .map(RemotePacketEvent::packet_payload_len)
+            .sum();
+        let mut cut_stats: BTreeMap<ShardId, (usize, usize)> = BTreeMap::new();
+        for packet in &packets {
+            let src_shard = self
+                .partition_map
+                .shard_for_host(packet.src_host_id)
+                .ok_or_else(|| {
+                    RemotePacketExchangeError::Backend(format!(
+                        "received remote packet from unknown source host {:?}",
+                        packet.src_host_id
+                    ))
+                })?;
+            let entry = cut_stats.entry(src_shard).or_default();
+            entry.0 += 1;
+            entry.1 += packet.packet_payload_len();
+        }
+        for packet in packets {
+            self.push_inbound_remote_packet(packet)?;
+        }
+        SIM_STATS.record_remote_packets_received(count, payload_bytes);
+        for (src_shard, (count, payload_bytes)) in cut_stats {
+            SIM_STATS.record_remote_packet_cut_received(
+                src_shard.0,
+                self.current_shard.0,
+                count,
+                payload_bytes,
+            );
+        }
+        Ok(next_event_time)
     }
 }
 

@@ -121,7 +121,7 @@ macro(add_shadow_tests)
    endif()
 
    set(SHADOW_TEST_COMMAND sh -c "\
-      rm -rf ${SHADOW_TEST_NAME}.data \
+       rm -rf ${SHADOW_TEST_NAME}.data ${SHADOW_TEST_NAME}.data.shard-* \
       && ${INVERT_ERROR_CODE} ${CMAKE_BINARY_DIR}/src/main/shadow \
       --data-directory=${SHADOW_TEST_NAME}.data \
       --log-level=${SHADOW_TEST_LOGLEVEL} \
@@ -168,6 +168,7 @@ add_subdirectory(compressed-graph)
 add_subdirectory(config)
 add_subdirectory(cpp)
 add_subdirectory(determinism)
+add_subdirectory(distributed)
 add_subdirectory(dup)
 add_subdirectory(environment)
 add_subdirectory(epoll)

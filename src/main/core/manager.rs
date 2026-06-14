@@ -11,6 +11,7 @@ use anyhow::Context;
 use atomic_refcell::AtomicRefCell;
 use linux_api::prctl::ArchPrctlOp;
 use log::{debug, warn};
+use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use scheduler::thread_per_core::ThreadPerCoreSched;
@@ -24,11 +25,14 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shmem::allocator::ShMemBlock;
 
 use crate::core::configuration::{self, ConfigOptions, Flatten};
-use crate::core::controller::{Controller, ShadowStatusBarState, SimController};
+use crate::core::controller::{ShadowStatusBarState, SimController};
 use crate::core::cpu;
+use crate::core::distributed::{
+    OutboundRemotePacketBuffer, PartitionMap, RemotePacketExchange, ShardId,
+};
 use crate::core::resource_usage;
 use crate::core::runahead::Runahead;
-use crate::core::sim_config::{Bandwidth, HostInfo};
+use crate::core::sim_config::{Bandwidth, HostDnsInfo, HostInfo, SimConfig};
 use crate::core::sim_stats;
 use crate::core::worker;
 use crate::cshadow as c;
@@ -41,7 +45,7 @@ use crate::utility::status_bar::Status;
 
 pub struct Manager<'a> {
     manager_config: Option<ManagerConfig>,
-    controller: &'a Controller<'a>,
+    controller: &'a dyn SimController,
     config: &'a ConfigOptions,
 
     raw_frequency: u64,
@@ -63,7 +67,7 @@ pub struct Manager<'a> {
 impl<'a> Manager<'a> {
     pub fn new(
         manager_config: ManagerConfig,
-        controller: &'a Controller<'a>,
+        controller: &'a dyn SimController,
         config: &'a ConfigOptions,
         end_time: EmulatedTime,
     ) -> anyhow::Result<Self> {
@@ -300,33 +304,33 @@ impl<'a> Manager<'a> {
         // Set up the global DNS before building the hosts
         let mut dns_builder = DnsBuilder::new();
 
-        // Assign the host id only once to guarantee it stays associated with its host.
-        let host_init: Vec<(&HostInfo, HostId)> = manager_config
-            .hosts
-            .iter()
-            .enumerate()
-            .map(|(i, info)| (info, HostId::from(u32::try_from(i).unwrap())))
-            .collect();
-
-        for (info, id) in &host_init {
+        for info in &manager_config.dns_hosts {
             // Extract the host address.
-            let std::net::IpAddr::V4(addr) = info.ip_addr.unwrap() else {
+            let std::net::IpAddr::V4(addr) = info.ip_addr else {
                 unreachable!("IPv6 not supported");
             };
 
             // Register in the global DNS.
             dns_builder
-                .register(*id, addr, info.name.clone())
+                .register(info.id, addr, info.name.clone())
                 .with_context(|| {
                     format!(
                         "Failed to register a host with id='{:?}', addr='{}', and name='{}' in the DNS module",
-                        *id, addr, info.name
+                        info.id, addr, info.name
                     )
                 })?;
         }
 
         // Convert to a global read-only DNS struct.
         let dns = dns_builder.into_dns()?;
+
+        // Host IDs are assigned while processing the full config so that future shard filtering
+        // can't change global host identity.
+        let host_init: Vec<(&HostInfo, HostId)> = manager_config
+            .hosts
+            .iter()
+            .map(|info| (info, info.id))
+            .collect();
 
         // Now build the hosts using the assigned host ids.
         // note: there are several return points before we add these hosts to the scheduler and we
@@ -377,6 +381,9 @@ impl<'a> Manager<'a> {
                 ip_assignment: manager_config.ip_assignment,
                 routing_info: manager_config.routing_info,
                 host_bandwidths: manager_config.host_bandwidths,
+                current_shard: manager_config.shard_id,
+                partition_map: manager_config.partition_map,
+                outbound_remote_packets: OutboundRemotePacketBuffer::default(),
                 // safe since the DNS type has an internal mutex
                 dns,
                 num_plugin_errors: AtomicU32::new(0),
@@ -447,6 +454,7 @@ impl<'a> Manager<'a> {
 
             let mut last_heartbeat = EmulatedTime::SIMULATION_START;
             let mut time_of_last_usage_check = std::time::Instant::now();
+            let remote_packet_exchange = manager_config.remote_packet_exchange.as_ref();
 
             // the scheduling loop
             while let Some((window_start, window_end)) = window {
@@ -514,14 +522,33 @@ impl<'a> Manager<'a> {
                     }
                 });
 
+                // The default exchange preserves single-shard behavior by requiring that no remote
+                // packets were produced. Future distributed controllers can put a real
+                // synchronization barrier between these send and receive calls.
+                let remote_packet_next_event_time = {
+                    let worker_shared = worker::WORKER_SHARED.borrow();
+                    let worker_shared = worker_shared.as_ref().unwrap();
+                    worker_shared.send_remote_packets(remote_packet_exchange)?;
+                    self.controller.remote_packet_send_complete()?;
+                    worker_shared.receive_remote_packets(remote_packet_exchange)?
+                };
+
                 // get the minimum next event time for all threads (also resets the next event times
                 // to None while we have them borrowed)
-                let min_next_event_time = thread_next_event_times
+                let local_min_next_event_time = thread_next_event_times
                     .iter()
                     // the take() resets it to None for the next scheduling loop
                     .filter_map(|x| x.borrow_mut().take())
                     .reduce(std::cmp::min)
                     .unwrap_or(EmulatedTime::MAX);
+                let min_next_event_time = [
+                    Some(local_min_next_event_time),
+                    remote_packet_next_event_time,
+                ]
+                .into_iter()
+                .flatten()
+                .reduce(std::cmp::min)
+                .unwrap_or(EmulatedTime::MAX);
 
                 log::debug!(
                     "Finished execution window [{}--{}], next event at {}",
@@ -534,7 +561,7 @@ impl<'a> Manager<'a> {
                 // order to fast-forward our execute window if possible
                 window = self
                     .controller
-                    .manager_finished_current_round(min_next_event_time);
+                    .manager_finished_current_round(min_next_event_time)?;
             }
 
             scheduler.scope(|s| {
@@ -847,8 +874,182 @@ pub struct ManagerConfig {
     // bandwidths of hosts at ip addresses
     pub host_bandwidths: HashMap<std::net::IpAddr, Bandwidth>,
 
+    // this manager's shard identity
+    pub shard_id: ShardId,
+
+    // map from global host id to owning shard
+    pub partition_map: PartitionMap,
+
+    // DNS records for every configured host, including hosts that may not execute on this manager
+    pub dns_hosts: Vec<HostDnsInfo>,
+
+    // cross-shard packet exchange backend
+    pub remote_packet_exchange: Box<dyn RemotePacketExchange>,
+
     // a list of hosts and their processes
     pub hosts: Vec<HostInfo>,
+}
+
+impl ManagerConfig {
+    pub fn from_sim_config(
+        mut sim_config: SimConfig,
+        shard_id: ShardId,
+        remote_packet_exchange: Box<dyn RemotePacketExchange>,
+    ) -> Self {
+        let hosts = sim_config
+            .hosts
+            .into_iter()
+            .filter(|host| {
+                sim_config
+                    .partition_map
+                    .is_host_local(shard_id, host.id)
+                    .unwrap_or_else(|| panic!("No shard owns host {:?}", host.id))
+            })
+            .collect();
+
+        Self {
+            random: Xoshiro256PlusPlus::from_rng(&mut sim_config.random),
+            ip_assignment: sim_config.ip_assignment,
+            routing_info: sim_config.routing_info,
+            host_bandwidths: sim_config.host_bandwidths,
+            shard_id,
+            partition_map: sim_config.partition_map,
+            dns_hosts: sim_config.dns_hosts,
+            remote_packet_exchange,
+            hosts,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use clap::Parser;
+
+    use super::*;
+    use crate::core::configuration::{CliOptions, ConfigFileOptions};
+    use crate::core::distributed::{
+        InProcessRemotePacketExchange, OutboundRemotePacket, PartitionMap, RemotePacketEvent,
+    };
+    use crate::core::sim_config::SimConfig;
+    use crate::network::packet::PacketRc;
+
+    struct TestDistributedManagerHarness {
+        config: ConfigOptions,
+        partition_map: PartitionMap,
+        exchange: Arc<InProcessRemotePacketExchange>,
+    }
+
+    impl TestDistributedManagerHarness {
+        fn new() -> Self {
+            let yaml = r#"
+                general:
+                  stop_time: 1 s
+                network:
+                  graph:
+                    type: 1_gbit_switch
+                hosts:
+                  hosta:
+                    network_node_id: 0
+                    processes:
+                    - path: /bin/true
+                  hostb:
+                    network_node_id: 0
+                    processes:
+                    - path: /bin/true
+            "#;
+            let config_file: ConfigFileOptions = serde_yaml::from_str(yaml).unwrap();
+            let cli = CliOptions::try_parse_from(["shadow", "-"]).unwrap();
+            let config = ConfigOptions::new(config_file, cli);
+
+            Self {
+                config,
+                partition_map: PartitionMap::from_host_shards([
+                    (HostId::from(0), ShardId(0)),
+                    (HostId::from(1), ShardId(1)),
+                ]),
+                exchange: Arc::new(InProcessRemotePacketExchange::default()),
+            }
+        }
+
+        fn manager_config(&self, shard_id: ShardId) -> ManagerConfig {
+            let mut sim_config = SimConfig::new(&self.config, &HashSet::new()).unwrap();
+            sim_config.partition_map = self.partition_map.clone();
+
+            ManagerConfig::from_sim_config(
+                sim_config,
+                shard_id,
+                Box::new(Arc::clone(&self.exchange)),
+            )
+        }
+    }
+
+    #[test]
+    fn manager_config_filters_local_hosts_but_keeps_global_dns_hosts() {
+        let harness = TestDistributedManagerHarness::new();
+        let manager_config = harness.manager_config(ShardId(1));
+
+        assert_eq!(manager_config.hosts.len(), 1);
+        assert_eq!(manager_config.hosts[0].id, HostId::from(1));
+        assert_eq!(manager_config.hosts[0].name, "hostb");
+        assert_eq!(manager_config.dns_hosts.len(), 2);
+        assert_eq!(manager_config.dns_hosts[0].id, HostId::from(0));
+        assert_eq!(manager_config.dns_hosts[1].id, HostId::from(1));
+    }
+
+    #[test]
+    fn test_harness_builds_multiple_shards_with_shared_exchange() {
+        let harness = TestDistributedManagerHarness::new();
+        let shard_0_config = harness.manager_config(ShardId(0));
+        let shard_1_config = harness.manager_config(ShardId(1));
+
+        assert_eq!(shard_0_config.hosts.len(), 1);
+        assert_eq!(shard_0_config.hosts[0].id, HostId::from(0));
+        assert_eq!(shard_1_config.hosts.len(), 1);
+        assert_eq!(shard_1_config.hosts[0].id, HostId::from(1));
+        assert_eq!(shard_0_config.dns_hosts.len(), 2);
+        assert_eq!(shard_1_config.dns_hosts.len(), 2);
+        assert_eq!(shard_0_config.partition_map, shard_1_config.partition_map);
+        assert_eq!(shard_0_config.dns_hosts[0].id, HostId::from(0));
+        assert_eq!(shard_0_config.dns_hosts[1].id, HostId::from(1));
+        assert_eq!(shard_1_config.dns_hosts[0].id, HostId::from(0));
+        assert_eq!(shard_1_config.dns_hosts[1].id, HostId::from(1));
+
+        let packet = PacketRc::new_ipv4_udp(
+            SocketAddrV4::new(Ipv4Addr::new(11, 0, 0, 1), 1234),
+            SocketAddrV4::new(Ipv4Addr::new(11, 0, 0, 2), 5678),
+            Bytes::from_static(b"shared exchange"),
+            1,
+        );
+        let remote_event = RemotePacketEvent::new(
+            EmulatedTime::SIMULATION_START,
+            HostId::from(0),
+            1,
+            HostId::from(1),
+            &packet,
+        )
+        .unwrap();
+
+        shard_0_config
+            .remote_packet_exchange
+            .send(vec![OutboundRemotePacket {
+                dst_shard: ShardId(1),
+                event: remote_event.clone(),
+            }])
+            .unwrap();
+
+        assert_eq!(
+            shard_1_config
+                .remote_packet_exchange
+                .receive(ShardId(1))
+                .unwrap(),
+            [remote_event]
+        );
+    }
 }
 
 /// Helper function to initialize the global [`Host`] before running the closure.

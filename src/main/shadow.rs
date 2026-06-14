@@ -3,9 +3,11 @@
 //! This is called from a small C wrapper for build complexity reasons.
 
 use std::borrow::Borrow;
-use std::ffi::{CStr, OsStr};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fmt::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::process::{Child, Command};
 use std::thread;
 
 use anyhow::Context;
@@ -15,6 +17,10 @@ use signal_hook::{consts, iterator::Signals};
 
 use crate::core::configuration::{CliOptions, ConfigFileOptions, ConfigOptions};
 use crate::core::controller::Controller;
+use crate::core::distributed::{
+    DistributedControlServer, DistributedPacketExchangeBackend, DistributedPacketExchangeContext,
+    RemotePacketExchangeError, ShardId,
+};
 use crate::core::logger::shadow_logger;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
@@ -25,6 +31,12 @@ use shadow_build_info::{BUILD_TIMESTAMP, GIT_BRANCH, GIT_COMMIT_INFO, GIT_DATE};
 
 const HELP_INFO_STR: &str =
     "For more information, visit https://shadow.github.io or https://github.com/shadow";
+
+const DISTRIBUTED_SHARD_ID_ARG: &str = "--distributed-shard-id";
+const DISTRIBUTED_SHARD_COUNT_ARG: &str = "--distributed-shard-count";
+const DISTRIBUTED_IPC_SOCKET_DIR_ARG: &str = "--distributed-ipc-socket-dir";
+const DATA_DIRECTORY_ARG: &str = "--data-directory";
+const DATA_DIRECTORY_SHORT_ARG: &str = "-d";
 
 /// Main entry point for the simulator.
 pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
@@ -130,6 +142,11 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         );
     }
 
+    let distributed_shard_count = shadow_config.experimental.distributed_shard_count.unwrap();
+    if distributed_shard_count > 1 && options.distributed_ipc_socket_dir.is_none() {
+        return launch_distributed_shards(&args, &options, &shadow_config, distributed_shard_count);
+    }
+
     // warn if running with root privileges
     if nix::unistd::getuid().is_root() {
         // a real-world example is opentracker, which will attempt to drop privileges if it detects
@@ -215,7 +232,11 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         .context("Failed to initialize the simulation")?;
 
     // allocate and initialize our main simulation driver
-    let controller = Controller::new(sim_config, &shadow_config);
+    let controller = if let Some(ipc_socket_dir) = options.distributed_ipc_socket_dir.clone() {
+        Controller::new_distributed_shard(sim_config, &shadow_config, ipc_socket_dir)?
+    } else {
+        Controller::new(sim_config, &shadow_config)
+    };
 
     // enable log buffering if not at trace level
     let buffer_log = !log::log_enabled!(log::Level::Trace);
@@ -235,6 +256,190 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn launch_distributed_shards(
+    args: &[&OsStr],
+    options: &CliOptions,
+    config: &ConfigOptions,
+    shard_count: u32,
+) -> anyhow::Result<()> {
+    if options.config.as_deref() == Some("-") {
+        return Err(anyhow::anyhow!(
+            "distributed shard launching does not support reading the config from stdin"
+        ));
+    }
+
+    let context =
+        DistributedPacketExchangeContext::temporary(DistributedPacketExchangeBackend::UnixSocket)
+            .context("Failed to initialize distributed IPC context")?;
+    let socket_dir = context.socket_dir().to_path_buf();
+    let control_server = DistributedControlServer::start(&socket_dir, shard_count)
+        .context("Failed to start distributed control server")?;
+    log::info!(
+        "Launching {shard_count} distributed Shadow shard processes using IPC socket directory '{}'",
+        socket_dir.display()
+    );
+
+    let program = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("missing argv[0] for distributed shard launch"))?;
+    let mut children: Vec<(ShardId, Child)> = Vec::new();
+
+    for shard_id in 0..shard_count {
+        let child_args = distributed_child_args(
+            args,
+            shard_id,
+            shard_count,
+            &socket_dir,
+            config.general.data_directory.as_ref().unwrap(),
+        );
+        match Command::new(program).args(child_args).spawn() {
+            Ok(child) => children.push((ShardId(shard_id), child)),
+            Err(e) => {
+                for (_shard_id, child) in &mut children {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(e).with_context(|| {
+                    format!("Failed to launch distributed shard process {shard_id}")
+                });
+            }
+        }
+    }
+
+    handle_distributed_shutdown_results(
+        wait_for_distributed_children(children),
+        control_server.shutdown(),
+    )?;
+
+    log::info!("All distributed Shadow shard processes finished successfully");
+    Ok(())
+}
+
+fn handle_distributed_shutdown_results(
+    child_result: anyhow::Result<()>,
+    control_result: Result<(), RemotePacketExchangeError>,
+) -> anyhow::Result<()> {
+    match (child_result, control_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(e)) => Err(e).context("Distributed control server failed"),
+        (Err(e), Ok(())) => Err(e),
+        (Err(child_error), Err(control_error)) => Err(anyhow::anyhow!(
+            "{child_error}; distributed control server also failed: {control_error}"
+        )),
+    }
+}
+
+fn wait_for_distributed_children(mut children: Vec<(ShardId, Child)>) -> anyhow::Result<()> {
+    while !children.is_empty() {
+        let mut child_index = 0;
+        let mut made_progress = false;
+
+        while child_index < children.len() {
+            let (shard_id, child) = &mut children[child_index];
+            let status = child
+                .try_wait()
+                .with_context(|| format!("Failed to poll distributed shard {shard_id:?}"))?;
+
+            let Some(status) = status else {
+                child_index += 1;
+                continue;
+            };
+
+            made_progress = true;
+            let (shard_id, _child) = children.swap_remove(child_index);
+            if !status.success() {
+                kill_distributed_children(&mut children);
+                return Err(anyhow::anyhow!(
+                    "distributed shard {shard_id:?} exited with {status}"
+                ));
+            }
+        }
+
+        if !made_progress {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    Ok(())
+}
+
+fn kill_distributed_children(children: &mut [(ShardId, Child)]) {
+    for (shard_id, child) in children {
+        if let Err(e) = child.kill() {
+            log::debug!("failed to kill distributed shard {shard_id:?}: {e}");
+        }
+        if let Err(e) = child.wait() {
+            log::debug!("failed to wait for killed distributed shard {shard_id:?}: {e}");
+        }
+    }
+}
+
+fn distributed_child_args(
+    args: &[&OsStr],
+    shard_id: u32,
+    shard_count: u32,
+    socket_dir: &Path,
+    base_data_dir: &str,
+) -> Vec<OsString> {
+    let mut child_args = Vec::new();
+    let mut skip_next = false;
+
+    for arg in args.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if is_distributed_child_arg(arg) {
+            skip_next = true;
+            continue;
+        }
+
+        if is_distributed_child_arg_with_inline_value(arg) {
+            continue;
+        }
+
+        child_args.push((*arg).to_os_string());
+    }
+
+    child_args.push(OsString::from(DISTRIBUTED_SHARD_ID_ARG));
+    child_args.push(OsString::from(shard_id.to_string()));
+    child_args.push(OsString::from(DISTRIBUTED_SHARD_COUNT_ARG));
+    child_args.push(OsString::from(shard_count.to_string()));
+    child_args.push(OsString::from(DISTRIBUTED_IPC_SOCKET_DIR_ARG));
+    child_args.push(socket_dir.as_os_str().to_os_string());
+    child_args.push(OsString::from(DATA_DIRECTORY_ARG));
+    child_args.push(OsString::from(format!("{base_data_dir}.shard-{shard_id}")));
+
+    child_args
+}
+
+fn is_distributed_child_arg(arg: &OsStr) -> bool {
+    arg == DISTRIBUTED_SHARD_ID_ARG
+        || arg == DISTRIBUTED_SHARD_COUNT_ARG
+        || arg == DISTRIBUTED_IPC_SOCKET_DIR_ARG
+        || arg == DATA_DIRECTORY_ARG
+        || arg == DATA_DIRECTORY_SHORT_ARG
+}
+
+fn is_distributed_child_arg_with_inline_value(arg: &OsStr) -> bool {
+    let Some(arg) = arg.to_str() else {
+        return false;
+    };
+
+    [
+        DISTRIBUTED_SHARD_ID_ARG,
+        DISTRIBUTED_SHARD_COUNT_ARG,
+        DISTRIBUTED_IPC_SOCKET_DIR_ARG,
+        DATA_DIRECTORY_ARG,
+    ]
+    .iter()
+    .any(|name| {
+        arg.strip_prefix(name)
+            .is_some_and(|suffix| suffix.starts_with('='))
+    })
 }
 
 pub fn version() -> String {
@@ -492,5 +697,216 @@ mod export {
 
         eprintln!("** Shadow completed successfully");
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distributed_child_args_append_internal_shard_settings() {
+        let args = [
+            OsStr::new("shadow"),
+            OsStr::new("--log-level"),
+            OsStr::new("debug"),
+            OsStr::new("config.yaml"),
+        ];
+
+        let child_args =
+            distributed_child_args(&args, 2, 4, Path::new("/tmp/shadow-ipc"), "shadow.data");
+
+        assert_eq!(
+            child_args,
+            [
+                OsString::from("--log-level"),
+                OsString::from("debug"),
+                OsString::from("config.yaml"),
+                OsString::from(DISTRIBUTED_SHARD_ID_ARG),
+                OsString::from("2"),
+                OsString::from(DISTRIBUTED_SHARD_COUNT_ARG),
+                OsString::from("4"),
+                OsString::from(DISTRIBUTED_IPC_SOCKET_DIR_ARG),
+                OsString::from("/tmp/shadow-ipc"),
+                OsString::from(DATA_DIRECTORY_ARG),
+                OsString::from("shadow.data.shard-2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn distributed_child_args_replace_existing_internal_shard_settings() {
+        let args = [
+            OsStr::new("shadow"),
+            OsStr::new("--log-level"),
+            OsStr::new("debug"),
+            OsStr::new("--distributed-shard-id=9"),
+            OsStr::new("--distributed-shard-count"),
+            OsStr::new("9"),
+            OsStr::new("--distributed-ipc-socket-dir"),
+            OsStr::new("/tmp/old"),
+            OsStr::new("--data-directory"),
+            OsStr::new("old.data"),
+            OsStr::new("config.yaml"),
+        ];
+
+        let child_args = distributed_child_args(&args, 1, 3, Path::new("/tmp/new"), "new.data");
+
+        assert_eq!(
+            child_args,
+            [
+                OsString::from("--log-level"),
+                OsString::from("debug"),
+                OsString::from("config.yaml"),
+                OsString::from(DISTRIBUTED_SHARD_ID_ARG),
+                OsString::from("1"),
+                OsString::from(DISTRIBUTED_SHARD_COUNT_ARG),
+                OsString::from("3"),
+                OsString::from(DISTRIBUTED_IPC_SOCKET_DIR_ARG),
+                OsString::from("/tmp/new"),
+                OsString::from(DATA_DIRECTORY_ARG),
+                OsString::from("new.data.shard-1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn distributed_child_wait_kills_remaining_children_on_first_failure() {
+        let failing_child = Command::new("sh").arg("-c").arg("exit 17").spawn().unwrap();
+        let long_running_child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60")
+            .spawn()
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let err = wait_for_distributed_children(vec![
+            (ShardId(0), failing_child),
+            (ShardId(1), long_running_child),
+        ])
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("distributed shard ShardId(0) exited")
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn distributed_child_wait_kills_control_blocked_child_on_first_failure() {
+        use std::io::BufRead;
+
+        let dir = tempfile::tempdir().unwrap();
+        let _server = DistributedControlServer::start(dir.path(), 2).unwrap();
+        let socket_path = dir.path().join("shadow-control.sock");
+        let mut control_blocked_child = Command::new("python3")
+            .arg("-c")
+            .arg(
+                r#"
+import socket
+import struct
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(sys.argv[1])
+payload = b"SHDW" + struct.pack(">BBIQB", 1, 1, 0, 0, 0)
+sock.sendall(struct.pack(">I", len(payload)) + payload)
+print("ready", flush=True)
+sock.recv(4)
+"#,
+            )
+            .arg(socket_path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = control_blocked_child.stdout.take().unwrap();
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        drop(stdout);
+
+        let failing_child = Command::new("sh").arg("-c").arg("exit 17").spawn().unwrap();
+
+        let start = std::time::Instant::now();
+        let err = wait_for_distributed_children(vec![
+            (ShardId(0), failing_child),
+            (ShardId(1), control_blocked_child),
+        ])
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("distributed shard ShardId(0) exited")
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn distributed_shutdown_reports_real_malformed_control_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = DistributedControlServer::start(dir.path(), 1).unwrap();
+        let socket_path = dir.path().join("shadow-control.sock");
+        let malformed_child = Command::new("python3")
+            .arg("-c")
+            .arg(
+                r#"
+import socket
+import struct
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(sys.argv[1])
+sock.sendall(struct.pack(">I", 4) + b"nope")
+sock.close()
+"#,
+            )
+            .arg(socket_path)
+            .spawn()
+            .unwrap();
+
+        let err = handle_distributed_shutdown_results(
+            wait_for_distributed_children(vec![(ShardId(0), malformed_child)]),
+            server.shutdown(),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        let root_cause = err.root_cause().to_string();
+
+        assert!(message.contains("Distributed control server failed"));
+        assert!(root_cause.contains("failed to decode distributed control request"));
+    }
+
+    #[test]
+    fn distributed_shutdown_reports_control_error_after_successful_children() {
+        let err = handle_distributed_shutdown_results(
+            Ok(()),
+            Err(RemotePacketExchangeError::Backend(
+                "protocol error".to_string(),
+            )),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Distributed control server failed")
+        );
+    }
+
+    #[test]
+    fn distributed_shutdown_reports_child_and_control_errors() {
+        let err = handle_distributed_shutdown_results(
+            Err(anyhow::anyhow!("child failed")),
+            Err(RemotePacketExchangeError::Backend(
+                "protocol error".to_string(),
+            )),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("child failed"));
+        assert!(message.contains("distributed control server also failed"));
+        assert!(message.contains("protocol error"));
     }
 }

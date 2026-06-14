@@ -1,0 +1,30 @@
+general:
+  stop_time: 10
+network:
+  graph:
+    type: 1_gbit_switch
+hosts:
+  clienta:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client servera:5678
+      start_time: 2
+  clientb:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client serverb:6789
+      start_time: 2
+  servera:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server 0.0.0.0:5678
+      start_time: 1
+  serverb:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server 0.0.0.0:6789
+      start_time: 1
