@@ -301,21 +301,21 @@ impl<'a> Manager<'a> {
         // Set up the global DNS before building the hosts
         let mut dns_builder = DnsBuilder::new();
 
-        // Assign the host id only once to guarantee it stays associated with its host.
-        let host_init: Vec<(&HostInfo, HostId)> = manager_config
+        // Assign the host id from SimConfig (deterministic, sorted hostname order).
+        let all_host_init: Vec<(&HostInfo, HostId)> = manager_config
             .hosts
             .iter()
-            .enumerate()
-            .map(|(i, info)| (info, HostId::from(u32::try_from(i).unwrap())))
+            .map(|info| {
+                let id = info.id.expect("HostInfo missing id");
+                (info, id)
+            })
             .collect();
 
-        for (info, id) in &host_init {
-            // Extract the host address.
+        // Register all hosts in global DNS (needed on every shard for cross-shard routing)
+        for (info, id) in &all_host_init {
             let std::net::IpAddr::V4(addr) = info.ip_addr.unwrap() else {
                 unreachable!("IPv6 not supported");
             };
-
-            // Register in the global DNS.
             dns_builder
                 .register(*id, addr, info.name.clone())
                 .with_context(|| {
@@ -329,12 +329,27 @@ impl<'a> Manager<'a> {
         // Convert to a global read-only DNS struct.
         let dns = dns_builder.into_dns()?;
 
+        // Build only hosts that are local to this shard.
+        let local_host_init: Vec<(&HostInfo, HostId)> = all_host_init
+            .into_iter()
+            .filter(|(info, id)| {
+                manager_config
+                    .partition_map
+                    .is_host_local(*id, manager_config.shard_id)
+            })
+            .collect();
+
+        if local_host_init.is_empty() {
+            log::warn!(
+                "Shard {}/{} has no local hosts. This shard will idle.",
+                manager_config.shard_id.0,
+                manager_config.partition_map.num_shards()
+            );
+            // Continue with empty hosts — the simulation still runs (just idles).
+        }
+
         // Now build the hosts using the assigned host ids.
-        // note: there are several return points before we add these hosts to the scheduler and we
-        // would leak memory if we return before then, but not worrying about that since the issues
-        // will go away when we move the hosts to rust, and if we don't add them to the scheduler
-        // then it means there was an error and we're going to exit anyways
-        let mut hosts: Vec<_> = host_init
+        let mut hosts: Vec<_> = local_host_init
             .iter()
             .map(|(info, id)| {
                 self.build_host(*id, info)
@@ -571,8 +586,20 @@ impl<'a> Manager<'a> {
                     // Compute global next-event time for window advancement
                     if let Some(ref sync) = manager_config.synchronizer {
                         let global_min = sync.global_min_next_event(min_next_event_time)?;
-                        window = Some((global_min, global_min));
-                        // Let the local runahead logic compute the actual window end
+
+                        let runahead = worker::WORKER_SHARED
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .runahead
+                            .get();
+                        let new_start = global_min;
+                        let new_end = new_start
+                            .checked_add(runahead)
+                            .unwrap_or(EmulatedTime::MAX);
+                        let new_end = std::cmp::min(new_end, self.end_time);
+                        let continue_running = new_start < new_end;
+                        window = continue_running.then_some((new_start, new_end));
                     }
                 }
 

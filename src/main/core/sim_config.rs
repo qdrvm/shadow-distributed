@@ -237,6 +237,16 @@ impl SimConfig {
             ));
         }
 
+        // Multi-shard distributed mode requires Rust TCP (legacy C TCP is not serializable).
+        if shard_count > 1 && !config.experimental.use_new_tcp.unwrap_or(false) {
+            return Err(anyhow::anyhow!(
+                "Distributed multi-shard mode (shard_count={shard_count}) requires \
+                 experimental.use_new_tcp=true. \
+                 Legacy C TCP packets cannot be serialized for cross-shard delivery. \
+                 Add 'experimental: {{ use_new_tcp: true }}' to your configuration."
+            ));
+        }
+
         Ok(Self {
             random,
             ip_assignment,

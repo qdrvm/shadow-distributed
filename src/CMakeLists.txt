@@ -12,11 +12,15 @@ if(SHADOW_USE_MPI STREQUAL ON)
   find_package(MPI REQUIRED)
   if(MPI_FOUND)
     message(STATUS "MPI found: ${MPI_C_INCLUDE_DIRS} ${MPI_C_LIBRARIES}")
-    set(RUST_FEATURES "${RUST_FEATURES} distributed_mpi")
+    # Only add distributed_mpi to the workspace (shadow-rs) build, not the shim.
+    # The shim crate doesn't define this feature.
+    set(WORKSPACE_FEATURES "${RUST_FEATURES} distributed_mpi")
     set(RUST_CFLAGS "${RUST_CFLAGS} ${MPI_C_INCLUDE_DIRS}")
   else()
     message(FATAL_ERROR "SHADOW_USE_MPI=ON but MPI was not found")
   endif()
+else()
+  set(WORKSPACE_FEATURES "${RUST_FEATURES}")
 endif()
 
 if(SHADOW_EXTRA_TESTS STREQUAL ON)
@@ -67,7 +71,7 @@ ExternalProject_Add(
         ${RUST_BUILD_FLAG} \
         ${RUST_TARGETS} \
         --target-dir \"${TARGETDIR}\" \
-        --features \"${RUST_FEATURES}\" \
+        --features \"${WORKSPACE_FEATURES}\" \
         "
     COMMAND echo "Building shadow-tests..."
     # Always build shadow-tests with the debug profile, even when shadow is built in release mode.
@@ -115,7 +119,7 @@ add_test(NAME rust-unit-tests
             ${RUST_BUILD_FLAG} \
             --manifest-path \"${CMAKE_CURRENT_SOURCE_DIR}\"/Cargo.toml \
             --target-dir \"${TARGETDIR}\" \
-            --features \"${RUST_FEATURES}\" \
+            --features \"${WORKSPACE_FEATURES}\" \
             "
          )
 # Longer timeout here and run serially, since it's running a whole test suite,

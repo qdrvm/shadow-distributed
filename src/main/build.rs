@@ -411,8 +411,14 @@ fn main() {
     link_mpi_if_enabled();
 }
 
-#[cfg(feature = "distributed_mpi")]
 fn link_mpi_if_enabled() {
+    // In build scripts, #[cfg(feature = "...")] doesn't work; Cargo sets
+    // CARGO_FEATURE_<name> env vars for the target package's features.
+    let mpi_enabled = std::env::var("CARGO_FEATURE_DISTRIBUTED_MPI").is_ok();
+    if !mpi_enabled {
+        return;
+    }
+
     // Use pkg-config to find the library path.
     if let Ok(libs) = std::process::Command::new("pkg-config")
         .args(["--libs", "ompi-c"])
@@ -431,6 +437,3 @@ fn link_mpi_if_enabled() {
         println!("cargo:rustc-link-lib=mpi");
     }
 }
-
-#[cfg(not(feature = "distributed_mpi"))]
-fn link_mpi_if_enabled() {}

@@ -406,6 +406,11 @@ impl Worker {
 
             match serialized {
                 Ok(packet) => {
+                    log::trace!(
+                        "Staging remote packet: src={:?} dst={:?}",
+                        src_host_id,
+                        dst_host_id
+                    );
                     let event = RemotePacketEvent {
                         deliver_time,
                         src_host_id,
@@ -667,14 +672,13 @@ impl WorkerShared {
     }
 
     /// Drain outbound remote packets in deterministic order and send via the exchange.
+    /// Always calls `exchange.send()` even when there are no outbound events,
+    /// because MPI collectives require all ranks to participate.
     pub fn send_remote_packets(
         &self,
         exchange: &dyn crate::core::distributed::exchange::RemotePacketExchange,
     ) -> anyhow::Result<usize> {
         let mut outbound = self.outbound_remote_packets.lock().unwrap();
-        if outbound.is_empty() {
-            return Ok(0);
-        }
         // Sort deterministically
         outbound.sort_by(|a, b| {
             a.deliver_time
@@ -685,6 +689,7 @@ impl WorkerShared {
         });
         let count = outbound.len();
         let events: Vec<RemotePacketEvent> = std::mem::take(&mut *outbound);
+        // Always call send to participate in MPI collectives
         exchange.send(self.shard_id, &events)?;
         Ok(count)
     }
@@ -702,22 +707,33 @@ impl WorkerShared {
                     let event_queue = self.event_queues.get(&delivery.dst_host_id).ok_or_else(|| {
                         anyhow::anyhow!("No event queue for host {:?}", delivery.dst_host_id)
                     })?;
-                    // Create a new packet Event from the remote event - push directly
-                    // TODO: convert SerializedPacket back to PacketRc for proper event creation
-                    // For now, push a minimal event that carries the metadata
-                    let mut queue = event_queue.lock().unwrap();
-                    // Since we can't easily create a PacketRc from SerializedPacket here,
-                    // we mark the delivery as received by the exchange mechanism.
-                    // The actual packet reconstruction happens at delivery time.
-                    log::trace!(
-                        "Received remote packet: src={:?} dst={:?} time={:?}",
-                        delivery.src_host_id,
-                        delivery.dst_host_id,
-                        delivery.deliver_time
-                    );
-                    // The event_queues.push would need a proper Event with a PacketRc.
-                    // This is a known integration gap - the packet needs to be
-                    // reconstructed from SerializedPacket.
+
+                    // Reconstruct a PacketRc from the serialized packet data
+                    match deserialize_packet_from_remote(&delivery.packet) {
+                        Ok(packetrc) => {
+                            let event = crate::core::work::event::Event::new_packet_with_meta(
+                                packetrc,
+                                delivery.deliver_time,
+                                delivery.src_host_id,
+                                delivery.src_host_event_id,
+                            );
+                            event_queue.lock().unwrap().push(event);
+                            log::trace!(
+                                "Delivered remote packet: src={:?} dst={:?} src_ev={} time={:?}",
+                                delivery.src_host_id,
+                                delivery.dst_host_id,
+                                delivery.src_host_event_id,
+                                delivery.deliver_time
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to reconstruct remote packet from {:?} to {:?}: {e}",
+                                delivery.src_host_id,
+                                delivery.dst_host_id
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("Failed to deliver remote packet: {e}");
@@ -784,6 +800,80 @@ fn serialize_packet_for_remote(packetrc: &PacketRc) -> Result<SerializedPacket, 
             }
         }
         _ => Err(format!("Unsupported protocol for remote delivery: {:?}", packetrc.iana_protocol())),
+    }
+}
+
+/// Reconstruct a `PacketRc` from a `SerializedPacket` that was received from a remote shard.
+fn deserialize_packet_from_remote(serialized: &SerializedPacket) -> Result<PacketRc, String> {
+    use bytes::Bytes;
+    use crate::host::network::interface::FifoPacketPriority;
+    use std::net::SocketAddrV4;
+
+    match serialized {
+        SerializedPacket::Udp {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            priority,
+            payload,
+        } => {
+            let src = SocketAddrV4::new(*src_ip, *src_port);
+            let dst = SocketAddrV4::new(*dst_ip, *dst_port);
+            Ok(PacketRc::new_ipv4_udp(src, dst, Bytes::from(payload.clone()), *priority))
+        }
+        SerializedPacket::Tcp {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            flags,
+            seq,
+            ack,
+            window_size,
+            window_scale,
+            selective_acks,
+            timestamp,
+            timestamp_echo,
+            priority,
+            payload,
+        } => {
+            use crate::network::packet::Packet;
+            let ip_header = tcp::Ipv4Header {
+                src: *src_ip,
+                dst: *dst_ip,
+            };
+            let tcp_flags = tcp::TcpFlags::from_bits_retain(*flags);
+
+            // Reconstruct SACK blocks via SmallArrayBackedSlice
+            let sacks: Option<tcp::util::SmallArrayBackedSlice<4, (u32, u32)>> =
+                if selective_acks.is_empty() {
+                    None
+                } else {
+                    tcp::util::SmallArrayBackedSlice::new(selective_acks)
+                        .ok_or_else(|| format!(
+                            "Too many SACK blocks for reconstruction: {}",
+                            selective_acks.len()
+                        ))?
+                        .into()
+                };
+
+            let tcp_header = tcp::TcpHeader {
+                ip: ip_header,
+                flags: tcp_flags,
+                src_port: *src_port,
+                dst_port: *dst_port,
+                seq: *seq,
+                ack: *ack,
+                window_size: *window_size,
+                selective_acks: sacks,
+                window_scale: *window_scale,
+                timestamp: *timestamp,
+                timestamp_echo: *timestamp_echo,
+            };
+            let tcp_payload = tcp::Payload(vec![Bytes::from(payload.clone())]);
+            Ok(PacketRc::new_ipv4_tcp(tcp_header, tcp_payload, *priority))
+        }
     }
 }
 

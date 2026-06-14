@@ -32,19 +32,32 @@ use super::{RemotePacketEvent, ShardId};
 mod ffi {
     use std::os::raw::{c_char, c_int, c_void};
 
-    pub type MPI_Comm = c_int;
+    /// MPI_Comm is an opaque pointer (ompi_communicator_t*).
+    pub type MPI_Comm = *mut c_void;
 
-    pub const MPI_COMM_WORLD: MPI_Comm = 0x44000000;
+    /// MPI_Datatype is an opaque pointer.
+    pub type MPI_Datatype = *mut c_void;
 
-    // MPI_Status as an opaque blob. Size from OpenMPI: 5 * sizeof(c_int) = 20 bytes.
-    // We use a generous size to be safe across MPI implementations.
+    /// MPI_Op is an opaque pointer.
+    pub type MPI_Op = *mut c_void;
+
+    // MPI_Status as an opaque blob (24 bytes on OpenMPI 4.1 / x86_64).
     #[repr(C)]
     pub struct MpiStatus {
-        _data: [u8; 32],
+        _data: [u8; 40],
     }
 
-    // MPI_Datatype: we only need the basic types.
-    pub type MPI_Datatype = c_int;
+    // External symbols from libmpi. These are resolved at link time.
+    // The C header expands MPI_COMM_WORLD to &ompi_mpi_comm_world, etc.
+    unsafe extern "C" {
+        pub static ompi_mpi_comm_world: c_void;
+        pub static ompi_mpi_int64_t: c_void;
+        pub static ompi_mpi_uint32_t: c_void;
+        pub static ompi_mpi_byte: c_void;
+        pub static ompi_mpi_uint64_t: c_void;
+        pub static ompi_mpi_op_min: c_void;
+        pub static ompi_mpi_op_max: c_void;
+    }
 
     unsafe extern "C" {
         pub fn MPI_Init(argc: *mut c_int, argv: *mut *mut *mut c_char) -> c_int;
@@ -89,15 +102,36 @@ mod ffi {
         pub fn MPI_Abort(comm: MPI_Comm, errorcode: c_int) -> c_int;
     }
 
-    pub type MPI_Op = c_int;
-    pub const MPI_MIN: MPI_Op = 0x4c000818;
-    pub const MPI_MAX: MPI_Op = 0x4c00081c;
+    /// Helper: get MPI_COMM_WORLD as an MPI_Comm pointer.
+    pub fn mpi_comm_world() -> MPI_Comm {
+        // Safety: `ompi_mpi_comm_world` is a global struct in libmpi.
+        // MPI_COMM_WORLD is defined as &ompi_mpi_comm_world.
+        unsafe { &ompi_mpi_comm_world as *const c_void as *mut c_void }
+    }
 
-    // MPI_Datatype values
-    pub const MPI_INT64_T: MPI_Datatype = 0x4c00082f;
-    pub const MPI_UINT32_T: MPI_Datatype = 0x4c000867;
-    pub const MPI_BYTE: MPI_Datatype = 0x4c00010d;
-    pub const MPI_UINT64_T: MPI_Datatype = 0x4c00086b;
+    pub fn mpi_int64_t() -> MPI_Datatype {
+        unsafe { &ompi_mpi_int64_t as *const c_void as *mut c_void }
+    }
+
+    pub fn mpi_uint32_t() -> MPI_Datatype {
+        unsafe { &ompi_mpi_uint32_t as *const c_void as *mut c_void }
+    }
+
+    pub fn mpi_byte() -> MPI_Datatype {
+        unsafe { &ompi_mpi_byte as *const c_void as *mut c_void }
+    }
+
+    pub fn mpi_uint64_t() -> MPI_Datatype {
+        unsafe { &ompi_mpi_uint64_t as *const c_void as *mut c_void }
+    }
+
+    pub fn mpi_min() -> MPI_Op {
+        unsafe { &ompi_mpi_op_min as *const c_void as *mut c_void }
+    }
+
+    pub fn mpi_max() -> MPI_Op {
+        unsafe { &ompi_mpi_op_max as *const c_void as *mut c_void }
+    }
 }
 
 /// Check MPI return code, converting to anyhow error on failure.
@@ -142,8 +176,8 @@ pub fn initialize_mpi() -> Result<()> {
     let mut rank: i32 = 0;
     let mut size: i32 = 0;
     unsafe {
-        check_mpi(ffi::MPI_Comm_rank(ffi::MPI_COMM_WORLD, &mut rank), "MPI_Comm_rank")?;
-        check_mpi(ffi::MPI_Comm_size(ffi::MPI_COMM_WORLD, &mut size), "MPI_Comm_size")?;
+        check_mpi(ffi::MPI_Comm_rank(ffi::mpi_comm_world(), &mut rank), "MPI_Comm_rank")?;
+        check_mpi(ffi::MPI_Comm_size(ffi::mpi_comm_world(), &mut size), "MPI_Comm_size")?;
     }
 
     log::info!("MPI initialized: rank {rank} of {size}");
@@ -179,7 +213,7 @@ pub fn mpi_abort_on_error(result: Result<()>, context: &str) -> Result<()> {
             log::error!("{msg}");
             eprintln!("{msg}");
             unsafe {
-                ffi::MPI_Abort(ffi::MPI_COMM_WORLD, 1);
+                ffi::MPI_Abort(ffi::mpi_comm_world(), 1);
             }
             Err(anyhow::anyhow!("{msg}"))
         }
@@ -202,7 +236,7 @@ impl MpiSynchronizer {
 impl DistributedSynchronizer for MpiSynchronizer {
     fn wait(&self) -> Result<()> {
         unsafe {
-            check_mpi(ffi::MPI_Barrier(ffi::MPI_COMM_WORLD), "MPI_Barrier")
+            check_mpi(ffi::MPI_Barrier(ffi::mpi_comm_world()), "MPI_Barrier")
         }
     }
 
@@ -222,9 +256,9 @@ impl DistributedSynchronizer for MpiSynchronizer {
                     &local_ns as *const i64 as *const std::os::raw::c_void,
                     &mut global_ns as *mut i64 as *mut std::os::raw::c_void,
                     1,
-                    ffi::MPI_INT64_T,
-                    ffi::MPI_MIN,
-                    ffi::MPI_COMM_WORLD,
+                    ffi::mpi_int64_t(),
+                    ffi::mpi_min(),
+                    ffi::mpi_comm_world(),
                 ),
                 "MPI_Allreduce(MIN)",
             )?;
@@ -248,6 +282,9 @@ impl DistributedSynchronizer for MpiSynchronizer {
 pub struct MpiRemotePacketExchange {
     rank: i32,
     size: i32,
+    /// Sizes received during the last call to `send()`, used by `receive()`.
+    /// One u32 per source rank, indicating how many bytes that rank is sending to us.
+    last_recv_sizes: std::sync::Mutex<Vec<u32>>,
 }
 
 impl MpiRemotePacketExchange {
@@ -256,6 +293,7 @@ impl MpiRemotePacketExchange {
         Ok(Self {
             rank: u.rank,
             size: u.size,
+            last_recv_sizes: std::sync::Mutex::new(vec![0u32; u.size as usize]),
         })
     }
 }
@@ -289,7 +327,9 @@ impl RemotePacketExchange for MpiRemotePacketExchange {
             })
             .collect();
 
-        // Exchange batch sizes via MPI_Alltoall (u32 per dst rank)
+        // Exchange batch sizes via MPI_Alltoall (u32 per dst rank).
+        // The receive side needs these sizes to know how many bytes to recv,
+        // so we save them for the subsequent `receive()` call.
         let send_sizes: Vec<u32> = encoded.iter().map(|b| b.len() as u32).collect();
         let mut recv_sizes = vec![0u32; size];
         unsafe {
@@ -297,15 +337,17 @@ impl RemotePacketExchange for MpiRemotePacketExchange {
                 ffi::MPI_Alltoall(
                     send_sizes.as_ptr() as *const std::os::raw::c_void,
                     1,
-                    ffi::MPI_UINT32_T,
+                    ffi::mpi_uint32_t(),
                     recv_sizes.as_mut_ptr() as *mut std::os::raw::c_void,
                     1,
-                    ffi::MPI_UINT32_T,
-                    ffi::MPI_COMM_WORLD,
+                    ffi::mpi_uint32_t(),
+                    ffi::mpi_comm_world(),
                 ),
                 "MPI_Alltoall(sizes)",
             )?;
         }
+        // Save for the receive phase
+        *self.last_recv_sizes.lock().unwrap() = recv_sizes;
 
         // Send batches to each destination rank (point-to-point)
         for (dst_rank, batch) in encoded.iter().enumerate() {
@@ -317,10 +359,10 @@ impl RemotePacketExchange for MpiRemotePacketExchange {
                     ffi::MPI_Send(
                         batch.as_ptr() as *const std::os::raw::c_void,
                         batch.len() as i32,
-                        ffi::MPI_BYTE,
+                        ffi::mpi_byte(),
                         dst_rank as i32,
                         0,
-                        ffi::MPI_COMM_WORLD,
+                        ffi::mpi_comm_world(),
                     ),
                     &format!("MPI_Send to rank {dst_rank}"),
                 )?;
@@ -337,23 +379,8 @@ impl RemotePacketExchange for MpiRemotePacketExchange {
         let size = self.size as usize;
         let rank = self.rank as usize;
 
-        // Exchange batch sizes
-        let send_sizes = vec![0u32; size];
-        let mut recv_sizes = vec![0u32; size];
-        unsafe {
-            check_mpi(
-                ffi::MPI_Alltoall(
-                    send_sizes.as_ptr() as *const std::os::raw::c_void,
-                    1,
-                    ffi::MPI_UINT32_T,
-                    recv_sizes.as_mut_ptr() as *mut std::os::raw::c_void,
-                    1,
-                    ffi::MPI_UINT32_T,
-                    ffi::MPI_COMM_WORLD,
-                ),
-                "MPI_Alltoall(sizes-recv)",
-            )?;
-        }
+        // Use the sizes from the send-phase MPI_Alltoall. No second collective needed.
+        let recv_sizes = self.last_recv_sizes.lock().unwrap().clone();
 
         let mut all_events = Vec::new();
 
@@ -372,10 +399,10 @@ impl RemotePacketExchange for MpiRemotePacketExchange {
                     ffi::MPI_Recv(
                         buf.as_mut_ptr() as *mut std::os::raw::c_void,
                         batch_size as i32,
-                        ffi::MPI_BYTE,
+                        ffi::mpi_byte(),
                         src_rank as i32,
                         0,
-                        ffi::MPI_COMM_WORLD,
+                        ffi::mpi_comm_world(),
                         std::ptr::null_mut(),
                     ),
                     &format!("MPI_Recv from rank {src_rank}"),
