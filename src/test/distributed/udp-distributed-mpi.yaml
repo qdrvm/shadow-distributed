@@ -1,0 +1,22 @@
+# Two-host UDP test for MPI distributed mode.
+# Designed to run with mpirun -np 2 shadow --distributed-shard-count 2 ...
+general:
+  stop_time: 10
+network:
+  graph:
+    type: 1_gbit_switch
+experimental:
+  use_new_tcp: true
+hosts:
+  hosta:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: server localhost:5678
+      start_time: 1
+  hostb:
+    network_node_id: 0
+    processes:
+    - path: ./test-udp
+      args: client localhost:5678
+      start_time: 2

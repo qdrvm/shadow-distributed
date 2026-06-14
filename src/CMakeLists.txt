@@ -7,6 +7,18 @@ if(SHADOW_USE_PERF_TIMERS STREQUAL ON)
   set(RUST_FEATURES "${RUST_FEATURES} perf_timers")
 endif()
 
+if(SHADOW_USE_MPI STREQUAL ON)
+  # Find MPI
+  find_package(MPI REQUIRED)
+  if(MPI_FOUND)
+    message(STATUS "MPI found: ${MPI_C_INCLUDE_DIRS} ${MPI_C_LIBRARIES}")
+    set(RUST_FEATURES "${RUST_FEATURES} distributed_mpi")
+    set(RUST_CFLAGS "${RUST_CFLAGS} ${MPI_C_INCLUDE_DIRS}")
+  else()
+    message(FATAL_ERROR "SHADOW_USE_MPI=ON but MPI was not found")
+  endif()
+endif()
+
 if(SHADOW_EXTRA_TESTS STREQUAL ON)
   set(TEST_FEATURES "${TEST_FEATURES} extra_tests")
 endif()

@@ -102,6 +102,7 @@ message(STATUS "SHADOW_VERSION_PATCH=${SHADOW_VERSION_PATCH}")
 option(SHADOW_TEST "build tests (default: OFF)" OFF)
 option(SHADOW_WERROR "turn compiler warnings into errors. (default: OFF)" OFF)
 option(SHADOW_USE_PERF_TIMERS "compile in timers for tracking the run time of various internal operations. (default: OFF)" OFF)
+option(SHADOW_USE_MPI "build with MPI support for distributed multi-node simulation (default: OFF)" OFF)
 
 ## display selected user options
 MESSAGE(STATUS)
@@ -111,6 +112,7 @@ MESSAGE(STATUS "SHADOW_TEST=${SHADOW_TEST}")
 MESSAGE(STATUS "SHADOW_WERROR=${SHADOW_WERROR}")
 MESSAGE(STATUS "SHADOW_EXTRA_TESTS=${SHADOW_EXTRA_TESTS}")
 MESSAGE(STATUS "SHADOW_USE_PERF_TIMERS=${SHADOW_USE_PERF_TIMERS}")
+MESSAGE(STATUS "SHADOW_USE_MPI=${SHADOW_USE_MPI}")
 MESSAGE(STATUS "-------------------------------------------------------------------------------")
 MESSAGE(STATUS)
 

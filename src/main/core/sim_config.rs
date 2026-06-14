@@ -17,10 +17,13 @@ use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 
+use shadow_shim_helper_rs::HostId;
+
 use crate::core::configuration::{
     ConfigOptions, EnvName, Flatten, HostOptions, LogLevel, ProcessArgs, ProcessFinalState,
     ProcessOptions, QDiscMode, parse_string_as_args,
 };
+use crate::core::distributed::{PartitionMap, ShardId};
 use crate::network::graph::{IpAssignment, NetworkGraph, RoutingInfo, load_network_graph};
 use crate::utility::units::{self, Unit};
 use crate::utility::{tilde_expansion, verify_plugin_path};
@@ -41,6 +44,15 @@ pub struct SimConfig {
 
     // a list of hosts and their processes
     pub hosts: Vec<HostInfo>,
+
+    // global host ids assigned in sorted hostname order (deterministic)
+    pub host_ids: HashMap<String, HostId>,
+
+    // partition map for distributed mode
+    pub partition_map: PartitionMap,
+
+    // current shard id
+    pub shard_id: ShardId,
 }
 
 impl SimConfig {
@@ -154,12 +166,86 @@ impl SimConfig {
             })
             .collect();
 
+        // Assign deterministic global host ids based on sorted hostname order.
+        // This must happen before any shard filtering so that host ids are stable
+        // regardless of partition count or layout.
+        let host_ids: HashMap<String, HostId> = hosts
+            .iter()
+            .enumerate()
+            .map(|(i, info)| {
+                (info.name.clone(), HostId::from(u32::try_from(i).unwrap()))
+            })
+            .collect();
+
+        // Set the host id on each HostInfo
+        for info in &mut hosts {
+            info.id = Some(host_ids[&info.name]);
+        }
+
+        // Build the partition map
+        let shard_count = config.experimental.distributed_shard_count.unwrap();
+        let shard_id = ShardId(config.experimental.distributed_shard_id.unwrap());
+        let host_id_list: Vec<HostId> = hosts
+            .iter()
+            .map(|info| host_ids[&info.name])
+            .collect();
+
+        let partition_map = if let Some(ref partition_file) =
+            config.experimental.distributed_partition_file
+        {
+            // Load explicit partition from YAML file
+            let contents = std::fs::read_to_string(partition_file)
+                .with_context(|| format!("Failed to read partition file '{partition_file}'"))?;
+            let hostname_to_shard: HashMap<String, u32> =
+                serde_yaml::from_str(&contents)
+                    .with_context(|| format!("Failed to parse partition file '{partition_file}'"))?;
+            let mapping: HashMap<HostId, ShardId> = hostname_to_shard
+                .iter()
+                .map(|(hostname, &s)| {
+                    let id = *host_ids.get(hostname).ok_or_else(|| {
+                        anyhow::anyhow!("Partition file references unknown host '{hostname}'")
+                    })?;
+                    if s >= shard_count {
+                        return Err(anyhow::anyhow!(
+                            "Partition file shard id {s} for host '{hostname}' exceeds shard count {shard_count}"
+                        ));
+                    }
+                    Ok((id, ShardId(s)))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            // Check all hosts are covered
+            for info in &hosts {
+                if !mapping.contains_key(&host_ids[&info.name]) {
+                    return Err(anyhow::anyhow!(
+                        "Partition file missing host '{}'", info.name
+                    ));
+                }
+            }
+            PartitionMap::from_host_shards(mapping, shard_count)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        } else {
+            // Default: modulo assignment
+            PartitionMap::by_host_id_modulo(&host_id_list, shard_count)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+
+        if shard_id.0 >= shard_count {
+            return Err(anyhow::anyhow!(
+                "Shard id {} exceeds shard count {}",
+                shard_id.0,
+                shard_count
+            ));
+        }
+
         Ok(Self {
             random,
             ip_assignment,
             routing_info,
             host_bandwidths,
             hosts,
+            host_ids,
+            partition_map,
+            shard_id,
         })
     }
 }
@@ -183,6 +269,8 @@ pub struct HostInfo {
     pub autotune_send_buf: bool,
     pub autotune_recv_buf: bool,
     pub qdisc: QDiscMode,
+    /// Global host id, assigned deterministically from sorted hostname order.
+    pub id: Option<HostId>,
 }
 
 #[derive(Clone)]
@@ -268,6 +356,8 @@ fn build_host(
                     .unwrap()
                     .value(),
             }),
+
+        id: None,
 
         // some options come from the config options and not the host options
         send_buf_size: config

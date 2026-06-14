@@ -3,6 +3,7 @@
 pub mod configuration;
 pub mod controller;
 pub mod cpu;
+pub mod distributed;
 pub mod logger;
 pub mod manager;
 pub mod resource_usage;

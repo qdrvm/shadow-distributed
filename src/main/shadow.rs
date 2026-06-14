@@ -191,6 +191,13 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     // log some information
+    // Initialize MPI if running in distributed MPI mode.
+    #[cfg(feature = "distributed_mpi")]
+    if shadow_config.experimental.distributed_shard_count.unwrap() > 1 {
+        crate::core::distributed::mpi_backend::initialize_mpi()
+            .context("Failed to initialize MPI for distributed mode")?;
+    }
+
     eprintln!("** Starting Shadow {}", env!("CARGO_PKG_VERSION"));
     let mut build_info = Vec::new();
     write_build_info(&mut build_info).unwrap();
@@ -225,7 +232,15 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     // run the simulation
-    controller.run().context("Failed to run the simulation")?;
+    let result = controller.run().context("Failed to run the simulation");
+
+    // Finalize MPI if running in distributed MPI mode
+    #[cfg(feature = "distributed_mpi")]
+    {
+        crate::core::distributed::mpi_backend::finalize_mpi();
+    }
+
+    let () = result?;
 
     // disable log buffering
     shadow_logger::set_buffering_enabled(false);

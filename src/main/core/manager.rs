@@ -26,6 +26,7 @@ use shadow_shmem::allocator::ShMemBlock;
 use crate::core::configuration::{self, ConfigOptions, Flatten};
 use crate::core::controller::{Controller, ShadowStatusBarState, SimController};
 use crate::core::cpu;
+use crate::core::distributed::exchange::RemotePacketExchange;
 use crate::core::resource_usage;
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::{Bandwidth, HostInfo};
@@ -394,6 +395,9 @@ impl<'a> Manager<'a> {
                     .collect(),
                 bootstrap_end_time,
                 sim_end_time: self.end_time,
+                partition_map: manager_config.partition_map.clone(),
+                shard_id: manager_config.shard_id,
+                outbound_remote_packets: Arc::new(std::sync::Mutex::new(Vec::new())),
             });
 
         // scope used so that the scheduler is dropped before we log the global counters below
@@ -516,7 +520,7 @@ impl<'a> Manager<'a> {
 
                 // get the minimum next event time for all threads (also resets the next event times
                 // to None while we have them borrowed)
-                let min_next_event_time = thread_next_event_times
+                let mut min_next_event_time = thread_next_event_times
                     .iter()
                     // the take() resets it to None for the next scheduling loop
                     .filter_map(|x| x.borrow_mut().take())
@@ -530,11 +534,55 @@ impl<'a> Manager<'a> {
                     (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos(),
                 );
 
+                // Exchange remote packets if we have a distributed backend
+                if let Some(ref exchange) = manager_config.remote_packet_exchange {
+                    // Synchronize: ensure all shards have sent before receiving
+                    if let Some(ref sync) = manager_config.synchronizer {
+                        sync.wait()?;
+                    }
+
+                    // Send outbound remote packets
+                    let _sent = worker::WORKER_SHARED
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .send_remote_packets(exchange.as_ref())?;
+
+                    // Synchronize again: all sends complete before any receive
+                    if let Some(ref sync) = manager_config.synchronizer {
+                        sync.wait()?;
+                    }
+
+                    // Receive inbound remote packets
+                    let recv_min_time = worker::WORKER_SHARED
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .receive_remote_packets(exchange.as_ref())?;
+
+                    // Update min_next_event_time to include remote arrivals
+                    let updated_min = [Some(min_next_event_time), recv_min_time]
+                        .into_iter()
+                        .flatten()
+                        .reduce(std::cmp::min)
+                        .unwrap_or(min_next_event_time);
+                    min_next_event_time = updated_min;
+
+                    // Compute global next-event time for window advancement
+                    if let Some(ref sync) = manager_config.synchronizer {
+                        let global_min = sync.global_min_next_event(min_next_event_time)?;
+                        window = Some((global_min, global_min));
+                        // Let the local runahead logic compute the actual window end
+                    }
+                }
+
                 // notify controller that we finished this round, and the time of our next event in
                 // order to fast-forward our execute window if possible
-                window = self
-                    .controller
-                    .manager_finished_current_round(min_next_event_time);
+                if manager_config.synchronizer.is_none() {
+                    window = self
+                        .controller
+                        .manager_finished_current_round(min_next_event_time);
+                }
             }
 
             scheduler.scope(|s| {
@@ -849,6 +897,12 @@ pub struct ManagerConfig {
 
     // a list of hosts and their processes
     pub hosts: Vec<HostInfo>,
+
+    // Distributed simulation fields
+    pub partition_map: crate::core::distributed::PartitionMap,
+    pub shard_id: crate::core::distributed::ShardId,
+    pub remote_packet_exchange: Option<Arc<dyn crate::core::distributed::exchange::RemotePacketExchange>>,
+    pub synchronizer: Option<Arc<dyn crate::core::distributed::synchronizer::DistributedSynchronizer>>,
 }
 
 /// Helper function to initialize the global [`Host`] before running the closure.

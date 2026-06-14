@@ -526,6 +526,30 @@ pub struct ExperimentalOptions {
     #[clap(long, value_name = "seconds")]
     #[clap(help = EXP_HELP.get("native_preemption_sim_interval").unwrap().as_str())]
     pub native_preemption_sim_interval: Option<units::Time<units::TimePrefix>>,
+
+    /// Number of distributed shards (1 = single-process, non-distributed).
+    /// Hidden — only used for distributed multi-process simulation.
+    #[clap(hide = true)]
+    #[clap(long, value_name = "N")]
+    pub distributed_shard_count: Option<u32>,
+
+    /// The shard id for this process (0-indexed, < shard_count).
+    /// Hidden — set by the launcher.
+    #[clap(hide = true)]
+    #[clap(long, value_name = "N")]
+    pub distributed_shard_id: Option<u32>,
+
+    /// Path to the distributed IPC socket directory.
+    /// Hidden — set by the launcher.
+    #[clap(hide = true)]
+    #[clap(long, value_name = "path")]
+    pub distributed_ipc_socket_dir: Option<String>,
+
+    /// Path to an explicit partition file (YAML mapping hostnames → shard ids).
+    /// Hidden.
+    #[clap(hide = true)]
+    #[clap(long, value_name = "path")]
+    pub distributed_partition_file: Option<String>,
 }
 
 impl ExperimentalOptions {
@@ -576,6 +600,10 @@ impl Default for ExperimentalOptions {
                 units::TimePrefix::Milli,
             )),
             native_preemption_sim_interval: Some(units::Time::new(10, units::TimePrefix::Milli)),
+            distributed_shard_count: Some(1),
+            distributed_shard_id: Some(0),
+            distributed_ipc_socket_dir: None,
+            distributed_partition_file: None,
         }
     }
 }

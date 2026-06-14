@@ -10,6 +10,8 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::util::time::TimeParts;
 
 use crate::core::configuration::ConfigOptions;
+use crate::core::distributed::exchange::{NoopRemotePacketExchange, RemotePacketExchange};
+use crate::core::distributed::synchronizer::{DistributedSynchronizer, SingleShardSynchronizer};
 use crate::core::manager::{Manager, ManagerConfig};
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
@@ -51,12 +53,70 @@ impl<'a> Controller<'a> {
             }
         });
 
+        let partition_map = sim_config.partition_map.clone();
+        let shard_id = sim_config.shard_id;
+        let shard_count = self.config.experimental.distributed_shard_count.unwrap();
+        let hosts = sim_config.hosts;
+
+        // Select exchange and synchronizer backends based on distributed configuration.
+        let (remote_packet_exchange, synchronizer): (
+            Option<Arc<dyn RemotePacketExchange>>,
+            Option<Arc<dyn DistributedSynchronizer>>,
+        ) = if shard_count > 1 {
+            #[cfg(feature = "distributed_mpi")]
+            {
+                use crate::core::distributed::mpi_backend::{
+                    MpiRemotePacketExchange, MpiSynchronizer,
+                };
+                log::info!(
+                    "Using MPI backend: shard {}/{} (rank {}/{})",
+                    shard_id.0,
+                    shard_count,
+                    shard_id.0,
+                    shard_count,
+                );
+                (
+                    Some(Arc::new(
+                        MpiRemotePacketExchange::new()
+                            .expect("MPI exchange init failed"),
+                    )),
+                    Some(Arc::new(
+                        MpiSynchronizer::new()
+                            .expect("MPI synchronizer init failed"),
+                    )),
+                )
+            }
+            #[cfg(not(feature = "distributed_mpi"))]
+            {
+                // Fall back to Unix socket or in-process for non-MPI multi-shard
+                // For now, use Noop which will fail-fast if remote packets are produced
+                log::warn!(
+                    "Multi-shard mode ({} shards) without MPI backend. \
+                     Use SHADOW_USE_MPI=ON for distributed multi-node simulation.",
+                    shard_count,
+                );
+                (
+                    Some(Arc::new(NoopRemotePacketExchange)),
+                    Some(Arc::new(SingleShardSynchronizer)),
+                )
+            }
+        } else {
+            (
+                Some(Arc::new(NoopRemotePacketExchange)),
+                Some(Arc::new(SingleShardSynchronizer)),
+            )
+        };
+
         let manager_config = ManagerConfig {
             random: Xoshiro256PlusPlus::from_rng(&mut sim_config.random),
             ip_assignment: sim_config.ip_assignment,
             routing_info: sim_config.routing_info,
             host_bandwidths: sim_config.host_bandwidths,
-            hosts: sim_config.hosts,
+            hosts,
+            partition_map,
+            shard_id,
+            remote_packet_exchange,
+            synchronizer,
         };
 
         let manager = Manager::new(manager_config, &self, self.config, self.end_time)

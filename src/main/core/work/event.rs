@@ -18,13 +18,29 @@ impl Event {
     /// A new packet event, which is an event for packets arriving from the Internet. Packet events
     /// do not include packets on localhost.
     pub fn new_packet(packet: PacketRc, time: EmulatedTime, src_host: &Host) -> Self {
+        Self::new_packet_with_meta(
+            packet,
+            time,
+            src_host.id(),
+            src_host.get_new_event_id(),
+        )
+    }
+
+    /// A new packet event with explicit source metadata, used by receiving shards
+    /// to preserve source ordering from the sending shard.
+    pub fn new_packet_with_meta(
+        packet: PacketRc,
+        time: EmulatedTime,
+        src_host_id: HostId,
+        src_host_event_id: u64,
+    ) -> Self {
         Self {
             magic: Magic::new(),
             time,
             data: EventData::Packet(PacketEventData {
                 packet,
-                src_host_id: src_host.id(),
-                src_host_event_id: src_host.get_new_event_id(),
+                src_host_id,
+                src_host_event_id,
             }),
             _counter: ObjectCounter::new("Event"),
         }
