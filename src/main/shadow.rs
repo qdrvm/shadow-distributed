@@ -107,6 +107,7 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         .with_context(|| format!("Failed to load configuration file {config_filename}"))?;
 
     // generate the final shadow configuration from the config file and cli options
+    #[cfg_attr(not(feature = "distributed_mpi"), allow(unused_mut))]
     let mut shadow_config = ConfigOptions::new(config_file, options.clone());
 
     if options.show_config {

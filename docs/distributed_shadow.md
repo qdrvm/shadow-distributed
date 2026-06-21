@@ -8,8 +8,8 @@ execution model.
 
 ## Prerequisites
 
-- **OpenMPI** (4.x tested) or **MPICH** with development headers
-- **pkg-config** (`ompi-c` or `mpich` package)
+- **OpenMPI** (4.x tested) with development headers
+- **pkg-config** (`ompi-c` package)
 - A Shadow configuration file with at least as many hosts as MPI ranks
 
 ### Install MPI on Ubuntu / Debian
@@ -179,25 +179,35 @@ are available:
 
 ```bash
 # Run all MPI tests
-ctest -R udp-distributed-mpi
+ctest -L mpi
 
-# Run only the 2-rank test
+# Run only the UDP 2-rank test
 ctest -R "udp-distributed-mpi-shadow$"
 
-# Run only the 4-rank test
+# Run only the UDP 4-rank test
 ctest -R "udp-distributed-mpi-4-shadow$"
 
+# Run only the TCP 2-rank test
+ctest -R "tcp-distributed-mpi-shadow$"
+
 # Verbose output on failure
-ctest -R udp-distributed-mpi --output-on-failure
+ctest -L mpi --output-on-failure
 ```
 
-Expected output:
+Example output; test numbers may differ:
 
 ```
-Test #46: udp-distributed-mpi-shadow ..... Passed    0.74 sec
-Test #47: udp-distributed-mpi-4-shadow ... Passed    0.60 sec
+Test #198: tcp-distributed-mpi-shadow .......................   Passed    0.60 sec
+Test #199: tcp-distributed-mpi-determinism-a-shadow .........   Passed    0.57 sec
+Test #200: tcp-distributed-mpi-determinism-b-shadow .........   Passed    0.58 sec
+Test #201: tcp-distributed-mpi-determinism-compare-shadow ...   Passed    0.02 sec
+Test #234: udp-distributed-mpi-shadow .......................   Passed    0.57 sec
+Test #235: udp-distributed-mpi-4-shadow .....................   Passed    0.62 sec
+Test #236: udp-distributed-mpi-determinism-a-shadow .........   Passed    0.59 sec
+Test #237: udp-distributed-mpi-determinism-b-shadow .........   Passed    0.58 sec
+Test #238: udp-distributed-mpi-determinism-compare-shadow ...   Passed    0.01 sec
 
-100% tests passed, 0 tests failed out of 2
+100% tests passed, 0 tests failed out of 9
 ```
 
 ## Architecture Overview
@@ -208,7 +218,7 @@ Test #47: udp-distributed-mpi-4-shadow ... Passed    0.60 sec
                  | - MPI_Barrier (sync)        |
                  | - MPI_Allreduce(MIN) (time) |
                  | - MPI_Alltoall (sizes)      |
-                 | - MPI_Send/Recv (payloads)  |
+                 | - MPI_Alltoallv (payloads)  |
                  +--------------+--------------+
                                 |
                  batched timestamped packet events
@@ -234,7 +244,7 @@ For each execution window `[window_start, window_end)`:
 3. Remote-destination packets are serialized and staged by destination shard
 4. **MPI_Barrier** — synchronize before exchange
 5. **MPI_Alltoall** — exchange batch sizes
-6. **MPI_Send / MPI_Recv** — exchange batch payloads (ordered by rank)
+6. **MPI_Alltoallv** — exchange batch payloads
 7. **MPI_Barrier** — synchronize after exchange
 8. Each shard sorts and injects received packets into local host event queues
 9. **MPI_Allreduce(MIN)** — compute global minimum next-event time across all shards
@@ -265,8 +275,9 @@ deterministic record.
   no work must still participate in MPI collectives (they idle at barriers).
 - **Single communicator** — All ranks must be in `MPI_COMM_WORLD`. Sub-communicators
   and dynamic process management are not yet supported.
-- **UDP tested** — Cross-shard TCP packet exchange is implemented but not yet
-  covered by automated CTests.
+- **OpenMPI FFI** — The current backend binds OpenMPI exported symbols directly.
+  MPICH support requires replacing these bindings with a portable C shim or
+  generated bindings.
 
 ## Troubleshooting
 
@@ -292,5 +303,5 @@ Add `experimental: { use_new_tcp: true }` to your YAML config, or pass
 ### Segmentation fault in MPI_Comm_rank
 
 This indicates an MPI ABI mismatch. The current FFI is tested with OpenMPI
-4.1.x on x86_64. If using MPICH or a different OpenMPI version, the MPI_Comm
-pointer type may differ. Rebuild with the matching MPI development headers.
+4.1.x on x86_64 and binds OpenMPI symbols directly. Rebuild with matching
+OpenMPI development headers and libraries.

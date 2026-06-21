@@ -157,6 +157,77 @@ macro(add_shadow_tests)
 
    set_property(TEST ${SHADOW_TEST_NAME} APPEND PROPERTY LABELS shadow)
 endmacro()
+
+macro(add_mpi_shadow_tests)
+   cmake_parse_arguments(MPI_SHADOW_TEST "" "BASENAME;NPROCS;SHADOW_CONFIG;POST_CMD;WORKING_DIRECTORY" "ARGS;PROPERTIES" ${ARGN})
+   if(DEFINED MPI_SHADOW_TEST_UNPARSED_ARGUMENTS)
+      message(FATAL_ERROR "Unrecognized arguments: ${MPI_SHADOW_TEST_UNPARSED_ARGUMENTS}")
+   endif()
+
+   if(SHADOW_USE_MPI STREQUAL ON)
+      if(NOT DEFINED MPI_SHADOW_TEST_SHADOW_CONFIG)
+         set(MPI_SHADOW_TEST_SHADOW_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/${MPI_SHADOW_TEST_BASENAME}.yaml")
+      endif()
+
+      if(NOT DEFINED MPI_SHADOW_TEST_WORKING_DIRECTORY)
+         set(MPI_SHADOW_TEST_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+      endif()
+
+      if(NOT DEFINED MPI_SHADOW_TEST_POST_CMD)
+         set(POST_CMD "true")
+      else()
+         set(POST_CMD "${MPI_SHADOW_TEST_POST_CMD}")
+      endif()
+
+      if(NOT "${MPI_SHADOW_TEST_ARGS}" MATCHES ".*--use-cpu-pinning.*")
+         list(APPEND MPI_SHADOW_TEST_ARGS "--use-cpu-pinning" "false")
+      endif()
+      if(NOT "${MPI_SHADOW_TEST_ARGS}" MATCHES ".*--strace-logging-mode.*")
+         list(APPEND MPI_SHADOW_TEST_ARGS "--strace-logging-mode" "standard")
+      endif()
+      if(NOT "${MPI_SHADOW_TEST_ARGS}" MATCHES ".*--parallelism.*")
+         list(APPEND MPI_SHADOW_TEST_ARGS "--parallelism" "1")
+      endif()
+      if(NOT "${MPI_SHADOW_TEST_ARGS}" MATCHES ".*--progress.*")
+         list(APPEND MPI_SHADOW_TEST_ARGS "--progress" "false")
+      endif()
+      if(NOT "${MPI_SHADOW_TEST_ARGS}" MATCHES ".*--report-errors-to-stderr.*")
+         list(APPEND MPI_SHADOW_TEST_ARGS "--report-errors-to-stderr" "false")
+      endif()
+
+      list(APPEND MPI_SHADOW_TEST_ARGS
+         "--distributed-shard-count" "${MPI_SHADOW_TEST_NPROCS}"
+         "--use-new-tcp" "true"
+      )
+
+      string(REPLACE ";" " " MPI_SHADOW_TEST_ARGS "${MPI_SHADOW_TEST_ARGS}")
+      string(REPLACE ";" " " MPIEXEC_PREFLAGS_STRING "${MPIEXEC_PREFLAGS}")
+      string(REPLACE ";" " " MPIEXEC_POSTFLAGS_STRING "${MPIEXEC_POSTFLAGS}")
+
+      set(MPI_SHADOW_TEST_NAME ${MPI_SHADOW_TEST_BASENAME}-shadow)
+      set(MPI_SHADOW_TEST_DATA_DIR ${CMAKE_CURRENT_BINARY_DIR}/${MPI_SHADOW_TEST_NAME}.data)
+      set(MPI_SHADOW_TEST_COMMAND sh -c "\
+         rm -rf ${MPI_SHADOW_TEST_DATA_DIR} ${MPI_SHADOW_TEST_DATA_DIR}.shard-* \
+         && ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${MPI_SHADOW_TEST_NPROCS} ${MPIEXEC_PREFLAGS_STRING} \
+            ${CMAKE_BINARY_DIR}/src/main/shadow ${MPIEXEC_POSTFLAGS_STRING} \
+            --data-directory=${MPI_SHADOW_TEST_DATA_DIR} \
+            --log-level=info \
+            ${MPI_SHADOW_TEST_ARGS} \
+            ${MPI_SHADOW_TEST_SHADOW_CONFIG} \
+         && (${POST_CMD}) \
+         "
+      )
+
+      add_test(NAME ${MPI_SHADOW_TEST_NAME} COMMAND ${MPI_SHADOW_TEST_COMMAND})
+      set_property(TEST ${MPI_SHADOW_TEST_NAME} PROPERTY WORKING_DIRECTORY ${MPI_SHADOW_TEST_WORKING_DIRECTORY})
+      set_property(TEST ${MPI_SHADOW_TEST_NAME} PROPERTY ENVIRONMENT "RUST_BACKTRACE=1;G_DEBUG=fatal-criticals")
+      set_property(TEST ${MPI_SHADOW_TEST_NAME} PROPERTY FAIL_REGULAR_EXPRESSION "Memory leak detected")
+      set_property(TEST ${MPI_SHADOW_TEST_NAME} APPEND PROPERTY LABELS shadow mpi)
+      if(DEFINED MPI_SHADOW_TEST_PROPERTIES)
+         set_tests_properties(${MPI_SHADOW_TEST_NAME} PROPERTIES ${MPI_SHADOW_TEST_PROPERTIES})
+      endif()
+   endif()
+endmacro()
 ## === end test helper macros ===
 
 add_subdirectory(bindc)

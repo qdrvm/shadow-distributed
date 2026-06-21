@@ -47,3 +47,31 @@ add_test(
 )
 set_tests_properties(tcp-distributed-determinism-compare-shadow
     PROPERTIES DEPENDS "tcp-distributed-determinism-a-shadow;tcp-distributed-determinism-b-shadow")
+
+add_mpi_shadow_tests(
+    BASENAME tcp-distributed-mpi
+    NPROCS 2
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/tcp-distributed.yaml
+)
+add_mpi_shadow_tests(
+    BASENAME tcp-distributed-mpi-determinism-a
+    NPROCS 2
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/tcp-distributed.yaml
+)
+add_mpi_shadow_tests(
+    BASENAME tcp-distributed-mpi-determinism-b
+    NPROCS 2
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/tcp-distributed.yaml
+)
+if(SHADOW_USE_MPI STREQUAL ON)
+    add_test(
+        NAME tcp-distributed-mpi-determinism-compare-shadow
+        COMMAND ${CMAKE_COMMAND}
+            -D RUN_A=${CMAKE_CURRENT_BINARY_DIR}/tcp-distributed-mpi-determinism-a-shadow.data
+            -D RUN_B=${CMAKE_CURRENT_BINARY_DIR}/tcp-distributed-mpi-determinism-b-shadow.data
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tcp_distributed_determinism_compare.cmake
+    )
+    set_tests_properties(tcp-distributed-mpi-determinism-compare-shadow
+        PROPERTIES DEPENDS "tcp-distributed-mpi-determinism-a-shadow;tcp-distributed-mpi-determinism-b-shadow")
+    set_property(TEST tcp-distributed-mpi-determinism-compare-shadow APPEND PROPERTY LABELS shadow mpi)
+endif()

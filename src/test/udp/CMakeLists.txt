@@ -53,6 +53,40 @@ add_test(
 set_tests_properties(udp-distributed-determinism-compare-shadow
     PROPERTIES DEPENDS "udp-distributed-determinism-a-shadow;udp-distributed-determinism-b-shadow")
 
+add_mpi_shadow_tests(
+    BASENAME udp-distributed-mpi
+    NPROCS 2
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/udp-distributed.yaml
+)
+add_mpi_shadow_tests(
+    BASENAME udp-distributed-mpi-4
+    NPROCS 4
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/udp-distributed-large-partition.yaml
+    ARGS --distributed-partition-file ${CMAKE_CURRENT_SOURCE_DIR}/udp-distributed-large-partition.partitions.yaml
+)
+add_mpi_shadow_tests(
+    BASENAME udp-distributed-mpi-determinism-a
+    NPROCS 2
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/udp-distributed.yaml
+)
+add_mpi_shadow_tests(
+    BASENAME udp-distributed-mpi-determinism-b
+    NPROCS 2
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/udp-distributed.yaml
+)
+if(SHADOW_USE_MPI STREQUAL ON)
+    add_test(
+        NAME udp-distributed-mpi-determinism-compare-shadow
+        COMMAND ${CMAKE_COMMAND}
+            -D RUN_A=${CMAKE_CURRENT_BINARY_DIR}/udp-distributed-mpi-determinism-a-shadow.data
+            -D RUN_B=${CMAKE_CURRENT_BINARY_DIR}/udp-distributed-mpi-determinism-b-shadow.data
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/udp_distributed_determinism_compare.cmake
+    )
+    set_tests_properties(udp-distributed-mpi-determinism-compare-shadow
+        PROPERTIES DEPENDS "udp-distributed-mpi-determinism-a-shadow;udp-distributed-mpi-determinism-b-shadow")
+    set_property(TEST udp-distributed-mpi-determinism-compare-shadow APPEND PROPERTY LABELS shadow mpi)
+endif()
+
 add_executable(test-udp-uniprocess test_udp_uniprocess.c)
 add_linux_tests(BASENAME udp-uniprocess COMMAND test-udp-uniprocess)
 add_shadow_tests(BASENAME udp-uniprocess)
