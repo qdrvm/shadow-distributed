@@ -396,10 +396,7 @@ impl Worker {
         if !is_local {
             // Remote destination: serialize a RemotePacketEvent and stage it
             let src_host_id = src_host.id();
-            let src_event_id = Worker::with(|w| {
-                w.shared.next_src_event_id()
-            })
-            .unwrap_or(0);
+            let src_event_id = Worker::with(|w| w.shared.next_src_event_id()).unwrap_or(0);
 
             // Try to serialize the packet
             let serialized = serialize_packet_for_remote(&packetrc);
@@ -419,11 +416,7 @@ impl Worker {
                         packet,
                     };
                     Worker::with(|w| {
-                        w.shared
-                            .outbound_remote_packets
-                            .lock()
-                            .unwrap()
-                            .push(event);
+                        w.shared.outbound_remote_packets.lock().unwrap().push(event);
                     });
                 }
                 Err(e) => {
@@ -702,11 +695,20 @@ impl WorkerShared {
     ) -> anyhow::Result<Option<EmulatedTime>> {
         let (events, min_time) = exchange.receive(self.shard_id)?;
         for event in &events {
-            match event.clone().into_local_event(self.shard_id, &self.partition_map) {
+            match event
+                .clone()
+                .into_local_event(self.shard_id, &self.partition_map)
+            {
                 Ok(delivery) => {
-                    let event_queue = self.event_queues.get(&delivery.dst_host_id).ok_or_else(|| {
-                        anyhow::anyhow!("No event queue for host {:?}", delivery.dst_host_id)
-                    })?;
+                    let event_queue =
+                        self.event_queues
+                            .get(&delivery.dst_host_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "No event queue for host {:?}",
+                                    delivery.dst_host_id
+                                )
+                            })?;
 
                     // Reconstruct a PacketRc from the serialized packet data
                     match deserialize_packet_from_remote(&delivery.packet) {
@@ -799,14 +801,17 @@ fn serialize_packet_for_remote(packetrc: &PacketRc) -> Result<SerializedPacket, 
                 }
             }
         }
-        _ => Err(format!("Unsupported protocol for remote delivery: {:?}", packetrc.iana_protocol())),
+        _ => Err(format!(
+            "Unsupported protocol for remote delivery: {:?}",
+            packetrc.iana_protocol()
+        )),
     }
 }
 
 /// Reconstruct a `PacketRc` from a `SerializedPacket` that was received from a remote shard.
 fn deserialize_packet_from_remote(serialized: &SerializedPacket) -> Result<PacketRc, String> {
-    use bytes::Bytes;
     use crate::host::network::interface::FifoPacketPriority;
+    use bytes::Bytes;
     use std::net::SocketAddrV4;
 
     match serialized {
@@ -820,7 +825,12 @@ fn deserialize_packet_from_remote(serialized: &SerializedPacket) -> Result<Packe
         } => {
             let src = SocketAddrV4::new(*src_ip, *src_port);
             let dst = SocketAddrV4::new(*dst_ip, *dst_port);
-            Ok(PacketRc::new_ipv4_udp(src, dst, Bytes::from(payload.clone()), *priority))
+            Ok(PacketRc::new_ipv4_udp(
+                src,
+                dst,
+                Bytes::from(payload.clone()),
+                *priority,
+            ))
         }
         SerializedPacket::Tcp {
             src_ip,
@@ -851,10 +861,12 @@ fn deserialize_packet_from_remote(serialized: &SerializedPacket) -> Result<Packe
                     None
                 } else {
                     tcp::util::SmallArrayBackedSlice::new(selective_acks)
-                        .ok_or_else(|| format!(
-                            "Too many SACK blocks for reconstruction: {}",
-                            selective_acks.len()
-                        ))?
+                        .ok_or_else(|| {
+                            format!(
+                                "Too many SACK blocks for reconstruction: {}",
+                                selective_acks.len()
+                            )
+                        })?
                         .into()
                 };
 

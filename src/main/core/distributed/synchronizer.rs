@@ -76,10 +76,8 @@ impl DistributedSynchronizer for UnixSocketSynchronizer {
             .client
             .send_recv(ControlMessage::NextEventTime(dt_nanos))?;
         match response {
-            ControlResponse::NextEventTime(nanos) => {
-                Ok(EmulatedTime::SIMULATION_START
-                    + shadow_shim_helper_rs::simulation_time::SimulationTime::from_nanos(nanos))
-            }
+            ControlResponse::NextEventTime(nanos) => Ok(EmulatedTime::SIMULATION_START
+                + shadow_shim_helper_rs::simulation_time::SimulationTime::from_nanos(nanos)),
             _ => Err(anyhow::anyhow!("Unexpected control response")),
         }
     }
@@ -137,10 +135,7 @@ impl UnixControlClient {
                     attempts += 1;
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     if attempts == 1 {
-                        log::info!(
-                            "Waiting for control socket at {}: {e}",
-                            path.display()
-                        );
+                        log::info!("Waiting for control socket at {}: {e}", path.display());
                     }
                 }
                 Err(e) => {
@@ -187,8 +182,14 @@ impl UnixControlClient {
                     return Err(anyhow::anyhow!("NextEventTime response too short"));
                 }
                 let nanos = u64::from_be_bytes([
-                    resp_buf[6], resp_buf[7], resp_buf[8], resp_buf[9],
-                    resp_buf[10], resp_buf[11], resp_buf[12], resp_buf[13],
+                    resp_buf[6],
+                    resp_buf[7],
+                    resp_buf[8],
+                    resp_buf[9],
+                    resp_buf[10],
+                    resp_buf[11],
+                    resp_buf[12],
+                    resp_buf[13],
                 ]);
                 Ok(ControlResponse::NextEventTime(nanos))
             }

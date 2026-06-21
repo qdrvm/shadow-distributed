@@ -27,6 +27,11 @@ use super::{RemotePacketEvent, ShardId};
 /// all inbound batches and sorts again to preserve the global ordering
 /// invariant regardless of transport receive order.
 pub trait RemotePacketExchange: Send + Sync {
+    /// Whether the manager must bracket `send`/`receive` with synchronizer barriers.
+    fn requires_external_synchronization(&self) -> bool {
+        true
+    }
+
     /// Send a batch of remote packet events to their destination shards.
     ///
     /// This is called after draining the outbound remote packet buffer. The
@@ -53,6 +58,10 @@ pub enum RemotePacketExchangeError {
 
 /// A forwarding `RemotePacketExchange` implementation for `Arc<T>`.
 impl<T: RemotePacketExchange> RemotePacketExchange for Arc<T> {
+    fn requires_external_synchronization(&self) -> bool {
+        self.as_ref().requires_external_synchronization()
+    }
+
     fn send(&self, src_shard: ShardId, events: &[RemotePacketEvent]) -> Result<()> {
         self.as_ref().send(src_shard, events)
     }

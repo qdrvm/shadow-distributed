@@ -208,12 +208,15 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
 
         // Rewrite the data directory to <base>.shard-N so each rank writes
         // to a distinct output directory, avoiding filesystem races.
-        let orig_dir = shadow_config.general.data_directory.as_ref().unwrap().clone();
+        let orig_dir = shadow_config
+            .general
+            .data_directory
+            .as_ref()
+            .unwrap()
+            .clone();
         let shard_dir = format!("{}.shard-{rank}", orig_dir);
         shadow_config.general.data_directory = Some(shard_dir.clone());
-        log::info!(
-            "MPI distributed mode: rank={rank} size={size} data_directory={shard_dir}"
-        );
+        log::info!("MPI distributed mode: rank={rank} size={size} data_directory={shard_dir}");
     }
 
     eprintln!("** Starting Shadow {}", env!("CARGO_PKG_VERSION"));

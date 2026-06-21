@@ -172,9 +172,7 @@ impl SimConfig {
         let host_ids: HashMap<String, HostId> = hosts
             .iter()
             .enumerate()
-            .map(|(i, info)| {
-                (info.name.clone(), HostId::from(u32::try_from(i).unwrap()))
-            })
+            .map(|(i, info)| (info.name.clone(), HostId::from(u32::try_from(i).unwrap())))
             .collect();
 
         // Set the host id on each HostInfo
@@ -185,10 +183,7 @@ impl SimConfig {
         // Build the partition map
         let shard_count = config.experimental.distributed_shard_count.unwrap();
         let shard_id = ShardId(config.experimental.distributed_shard_id.unwrap());
-        let host_id_list: Vec<HostId> = hosts
-            .iter()
-            .map(|info| host_ids[&info.name])
-            .collect();
+        let host_id_list: Vec<HostId> = hosts.iter().map(|info| host_ids[&info.name]).collect();
 
         let partition_map = if let Some(ref partition_file) =
             config.experimental.distributed_partition_file
@@ -196,9 +191,8 @@ impl SimConfig {
             // Load explicit partition from YAML file
             let contents = std::fs::read_to_string(partition_file)
                 .with_context(|| format!("Failed to read partition file '{partition_file}'"))?;
-            let hostname_to_shard: HashMap<String, u32> =
-                serde_yaml::from_str(&contents)
-                    .with_context(|| format!("Failed to parse partition file '{partition_file}'"))?;
+            let hostname_to_shard: HashMap<String, u32> = serde_yaml::from_str(&contents)
+                .with_context(|| format!("Failed to parse partition file '{partition_file}'"))?;
             let mapping: HashMap<HostId, ShardId> = hostname_to_shard
                 .iter()
                 .map(|(hostname, &s)| {
@@ -217,7 +211,8 @@ impl SimConfig {
             for info in &hosts {
                 if !mapping.contains_key(&host_ids[&info.name]) {
                     return Err(anyhow::anyhow!(
-                        "Partition file missing host '{}'", info.name
+                        "Partition file missing host '{}'",
+                        info.name
                     ));
                 }
             }

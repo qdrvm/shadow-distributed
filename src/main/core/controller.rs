@@ -77,7 +77,7 @@ impl<'a> Controller<'a> {
                 );
                 (
                     Some(Arc::new(
-                        MpiRemotePacketExchange::new()
+                        MpiRemotePacketExchange::new(partition_map.clone())
                             .expect("MPI exchange init failed"),
                     )),
                     Some(Arc::new(

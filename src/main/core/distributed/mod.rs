@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
-use shadow_shim_helper_rs::HostId;
 
 pub mod exchange;
 pub mod synchronizer;
@@ -262,20 +262,30 @@ impl SerializedPacket {
                 if data.len() < 25 {
                     return Err(PacketSerializationError::Truncated);
                 }
-                let src_ip = std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+                let src_ip =
+                    std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
                 pos += 4;
-                let dst_ip = std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+                let dst_ip =
+                    std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
                 pos += 4;
                 let src_port = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 pos += 2;
                 let dst_port = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 pos += 2;
                 let priority = u64::from_be_bytes([
-                    data[pos], data[pos+1], data[pos+2], data[pos+3],
-                    data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
                 ]);
                 pos += 8;
-                let payload_len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+                let payload_len =
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
                 if data.len() < pos + payload_len {
                     return Err(PacketSerializationError::Truncated);
@@ -295,9 +305,11 @@ impl SerializedPacket {
                 if data.len() < 30 {
                     return Err(PacketSerializationError::Truncated);
                 }
-                let src_ip = std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+                let src_ip =
+                    std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
                 pos += 4;
-                let dst_ip = std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+                let dst_ip =
+                    std::net::Ipv4Addr::new(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
                 pos += 4;
                 let src_port = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 pos += 2;
@@ -305,9 +317,11 @@ impl SerializedPacket {
                 pos += 2;
                 let flags = data[pos];
                 pos += 1;
-                let seq = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+                let seq =
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
                 pos += 4;
-                let ack = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+                let ack =
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
                 pos += 4;
                 let window_size = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 pos += 2;
@@ -322,7 +336,9 @@ impl SerializedPacket {
                 if data.len() < pos + 4 {
                     return Err(PacketSerializationError::Truncated);
                 }
-                let sack_count = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+                let sack_count =
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
                 if sack_count > 64 {
                     return Err(PacketSerializationError::TooManySackBlocks(sack_count));
@@ -332,9 +348,19 @@ impl SerializedPacket {
                 }
                 let mut selective_acks = Vec::with_capacity(sack_count);
                 for _ in 0..sack_count {
-                    let left = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+                    let left = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]);
                     pos += 4;
-                    let right = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+                    let right = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]);
                     pos += 4;
                     selective_acks.push((left, right));
                 }
@@ -343,7 +369,12 @@ impl SerializedPacket {
                     if data.len() < pos + 4 {
                         return Err(PacketSerializationError::Truncated);
                     }
-                    let ts = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+                    let ts = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]);
                     pos += 4;
                     Some(ts)
                 } else {
@@ -355,7 +386,12 @@ impl SerializedPacket {
                     if data.len() < pos + 4 {
                         return Err(PacketSerializationError::Truncated);
                     }
-                    let te = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+                    let te = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]);
                     pos += 4;
                     Some(te)
                 } else {
@@ -366,14 +402,22 @@ impl SerializedPacket {
                     return Err(PacketSerializationError::Truncated);
                 }
                 let priority = u64::from_be_bytes([
-                    data[pos], data[pos+1], data[pos+2], data[pos+3],
-                    data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
                 ]);
                 pos += 8;
                 if data.len() < pos + 4 {
                     return Err(PacketSerializationError::Truncated);
                 }
-                let payload_len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+                let payload_len =
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
                 if data.len() < pos + payload_len {
                     return Err(PacketSerializationError::Truncated);
@@ -451,7 +495,10 @@ impl RemotePacketEvent {
         for event in events {
             let packet_bytes = event.packet.to_bytes();
             // deliver_time as i64 nanos since SIMULATION_START
-            let dt_nanos = event.deliver_time.duration_since(&EmulatedTime::SIMULATION_START).as_nanos();
+            let dt_nanos = event
+                .deliver_time
+                .duration_since(&EmulatedTime::SIMULATION_START)
+                .as_nanos();
             buf.extend_from_slice(&(dt_nanos as u64).to_be_bytes());
             buf.extend_from_slice(&u32::from(event.src_host_id).to_be_bytes());
             buf.extend_from_slice(&event.src_host_event_id.to_be_bytes());
@@ -486,20 +533,44 @@ impl RemotePacketEvent {
                 return Err(PacketSerializationError::Truncated);
             }
             let dt_nanos = u64::from_be_bytes([
-                data[pos], data[pos+1], data[pos+2], data[pos+3],
-                data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+                data[pos + 4],
+                data[pos + 5],
+                data[pos + 6],
+                data[pos + 7],
             ]);
             pos += 8;
-            let src_host_id = HostId::from(u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]));
+            let src_host_id = HostId::from(u32::from_be_bytes([
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+            ]));
             pos += 4;
             let src_host_event_id = u64::from_be_bytes([
-                data[pos], data[pos+1], data[pos+2], data[pos+3],
-                data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+                data[pos + 4],
+                data[pos + 5],
+                data[pos + 6],
+                data[pos + 7],
             ]);
             pos += 8;
-            let dst_host_id = HostId::from(u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]));
+            let dst_host_id = HostId::from(u32::from_be_bytes([
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+            ]));
             pos += 4;
-            let packet_len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            let packet_len =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
             pos += 4;
             if packet_len > Self::MAX_PAYLOAD_BYTES + 1024 {
                 return Err(PacketSerializationError::TooManySackBlocks(packet_len));
@@ -509,8 +580,8 @@ impl RemotePacketEvent {
             }
             let packet = SerializedPacket::from_bytes(&data[pos..pos + packet_len])?;
             pos += packet_len;
-            let deliver_time = EmulatedTime::SIMULATION_START
-                + SimulationTime::from_nanos(dt_nanos);
+            let deliver_time =
+                EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(dt_nanos);
             events.push(Self {
                 deliver_time,
                 src_host_id,
@@ -530,11 +601,9 @@ impl RemotePacketEvent {
         local_shard: ShardId,
         partition_map: &PartitionMap,
     ) -> Result<RemotePacketDelivery, RemotePacketDeliveryError> {
-        let dst_shard = partition_map
-            .shard_for_host(self.dst_host_id)
-            .ok_or(RemotePacketDeliveryError::UnknownDestinationHost(
-                self.dst_host_id,
-            ))?;
+        let dst_shard = partition_map.shard_for_host(self.dst_host_id).ok_or(
+            RemotePacketDeliveryError::UnknownDestinationHost(self.dst_host_id),
+        )?;
         if dst_shard != local_shard {
             return Err(RemotePacketDeliveryError::NonLocalDestination {
                 host: self.dst_host_id,
@@ -567,7 +636,9 @@ pub struct RemotePacketDelivery {
 pub enum RemotePacketDeliveryError {
     #[error("Unknown destination host {0:?}")]
     UnknownDestinationHost(HostId),
-    #[error("Non-local destination: host {host:?} belongs to shard {actual_shard}, not {expected_shard}")]
+    #[error(
+        "Non-local destination: host {host:?} belongs to shard {actual_shard}, not {expected_shard}"
+    )]
     NonLocalDestination {
         host: HostId,
         expected_shard: ShardId,
@@ -730,7 +801,9 @@ mod tests {
             packet: SerializedPacket::Udp {
                 src_ip: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 dst_ip: std::net::Ipv4Addr::new(10, 0, 0, 2),
-                src_port: 0, dst_port: 0, priority: 0u64,
+                src_port: 0,
+                dst_port: 0,
+                priority: 0u64,
                 payload: vec![],
             },
         };
@@ -742,7 +815,9 @@ mod tests {
             packet: SerializedPacket::Udp {
                 src_ip: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 dst_ip: std::net::Ipv4Addr::new(10, 0, 0, 2),
-                src_port: 0, dst_port: 0, priority: 0u64,
+                src_port: 0,
+                dst_port: 0,
+                priority: 0u64,
                 payload: vec![],
             },
         };
@@ -764,7 +839,9 @@ mod tests {
             packet: SerializedPacket::Udp {
                 src_ip: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 dst_ip: std::net::Ipv4Addr::new(10, 0, 0, 2),
-                src_port: 0, dst_port: 0, priority: 0u64,
+                src_port: 0,
+                dst_port: 0,
+                priority: 0u64,
                 payload: vec![],
             },
         };

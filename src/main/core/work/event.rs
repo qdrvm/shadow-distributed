@@ -18,12 +18,7 @@ impl Event {
     /// A new packet event, which is an event for packets arriving from the Internet. Packet events
     /// do not include packets on localhost.
     pub fn new_packet(packet: PacketRc, time: EmulatedTime, src_host: &Host) -> Self {
-        Self::new_packet_with_meta(
-            packet,
-            time,
-            src_host.id(),
-            src_host.get_new_event_id(),
-        )
+        Self::new_packet_with_meta(packet, time, src_host.id(), src_host.get_new_event_id())
     }
 
     /// A new packet event with explicit source metadata, used by receiving shards

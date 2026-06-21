@@ -551,8 +551,13 @@ impl<'a> Manager<'a> {
 
                 // Exchange remote packets if we have a distributed backend
                 if let Some(ref exchange) = manager_config.remote_packet_exchange {
+                    let requires_external_synchronization =
+                        exchange.requires_external_synchronization();
+
                     // Synchronize: ensure all shards have sent before receiving
-                    if let Some(ref sync) = manager_config.synchronizer {
+                    if requires_external_synchronization
+                        && let Some(ref sync) = manager_config.synchronizer
+                    {
                         sync.wait()?;
                     }
 
@@ -564,7 +569,9 @@ impl<'a> Manager<'a> {
                         .send_remote_packets(exchange.as_ref())?;
 
                     // Synchronize again: all sends complete before any receive
-                    if let Some(ref sync) = manager_config.synchronizer {
+                    if requires_external_synchronization
+                        && let Some(ref sync) = manager_config.synchronizer
+                    {
                         sync.wait()?;
                     }
 
