@@ -172,6 +172,20 @@ ls shadow.data.shard-*/
 The `sim-stats.json` in each shard directory includes distributed metrics if
 cross-shard packets were exchanged.
 
+Important distributed metric fields include:
+
+- `remote_packets_sent` / `remote_packets_received`: cross-shard packet counts.
+- `remote_packet_payload_bytes_sent` / `remote_packet_payload_bytes_received`:
+  cross-shard payload bytes.
+- `remote_packet_cut_matrix`: packets and bytes exchanged by shard pair.
+- `control_barrier_wait_time_ns`: total distributed synchronization wait time.
+- `mpi_barrier_wait_time_ns`, `mpi_allreduce_time_ns`,
+  `mpi_alltoall_sizes_time_ns`, and `mpi_alltoallv_payload_time_ns`: MPI
+  collective timing totals.
+- `remote_packet_encode_time_ns`, `remote_packet_decode_time_ns`, and
+  `remote_packet_inbound_injection_time_ns`: Shadow-side packet processing
+  timing totals.
+
 ## MPI CTest Suite
 
 When built with `-DSHADOW_TEST=ON -DSHADOW_USE_MPI=ON`, the following MPI tests

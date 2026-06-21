@@ -110,9 +110,64 @@ impl SharedSimStats {
     pub fn record_distributed_barrier_wait(&self, duration: std::time::Duration) {
         let mut distributed = self.distributed.lock().unwrap();
         distributed.control_barrier_wait_count += 1;
-        distributed.control_barrier_wait_time_ns +=
-            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        distributed.control_barrier_wait_time_ns =
+            add_duration_ns(distributed.control_barrier_wait_time_ns, duration);
     }
+
+    pub fn record_mpi_barrier_wait(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.mpi_barrier_wait_count += 1;
+        distributed.mpi_barrier_wait_time_ns =
+            add_duration_ns(distributed.mpi_barrier_wait_time_ns, duration);
+    }
+
+    pub fn record_mpi_allreduce_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.mpi_allreduce_count += 1;
+        distributed.mpi_allreduce_time_ns =
+            add_duration_ns(distributed.mpi_allreduce_time_ns, duration);
+    }
+
+    pub fn record_mpi_alltoall_sizes_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.mpi_alltoall_sizes_count += 1;
+        distributed.mpi_alltoall_sizes_time_ns =
+            add_duration_ns(distributed.mpi_alltoall_sizes_time_ns, duration);
+    }
+
+    pub fn record_mpi_alltoallv_payload_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.mpi_alltoallv_payload_count += 1;
+        distributed.mpi_alltoallv_payload_time_ns =
+            add_duration_ns(distributed.mpi_alltoallv_payload_time_ns, duration);
+    }
+
+    pub fn record_remote_packet_encode_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.remote_packet_encode_count += 1;
+        distributed.remote_packet_encode_time_ns =
+            add_duration_ns(distributed.remote_packet_encode_time_ns, duration);
+    }
+
+    pub fn record_remote_packet_decode_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.remote_packet_decode_count += 1;
+        distributed.remote_packet_decode_time_ns =
+            add_duration_ns(distributed.remote_packet_decode_time_ns, duration);
+    }
+
+    pub fn record_remote_packet_inbound_injection_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.remote_packet_inbound_injection_count += 1;
+        distributed.remote_packet_inbound_injection_time_ns = add_duration_ns(
+            distributed.remote_packet_inbound_injection_time_ns,
+            duration,
+        );
+    }
+}
+
+fn add_duration_ns(total: u64, duration: std::time::Duration) -> u64 {
+    total.saturating_add(u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
 }
 
 impl Default for SharedSimStats {
@@ -144,6 +199,20 @@ pub struct DistributedSimStats {
     pub remote_packet_cut_matrix: BTreeMap<String, DistributedShardCutStats>,
     pub control_barrier_wait_count: u64,
     pub control_barrier_wait_time_ns: u64,
+    pub mpi_barrier_wait_count: u64,
+    pub mpi_barrier_wait_time_ns: u64,
+    pub mpi_allreduce_count: u64,
+    pub mpi_allreduce_time_ns: u64,
+    pub mpi_alltoall_sizes_count: u64,
+    pub mpi_alltoall_sizes_time_ns: u64,
+    pub mpi_alltoallv_payload_count: u64,
+    pub mpi_alltoallv_payload_time_ns: u64,
+    pub remote_packet_encode_count: u64,
+    pub remote_packet_encode_time_ns: u64,
+    pub remote_packet_decode_count: u64,
+    pub remote_packet_decode_time_ns: u64,
+    pub remote_packet_inbound_injection_count: u64,
+    pub remote_packet_inbound_injection_time_ns: u64,
 }
 
 impl DistributedSimStats {
@@ -216,6 +285,13 @@ mod tests {
         stats.record_remote_packets_received(3, 200);
         stats.record_remote_packet_cut_received(0, 1, 3, 200);
         stats.record_distributed_barrier_wait(std::time::Duration::from_nanos(50));
+        stats.record_mpi_barrier_wait(std::time::Duration::from_nanos(60));
+        stats.record_mpi_allreduce_time(std::time::Duration::from_nanos(70));
+        stats.record_mpi_alltoall_sizes_time(std::time::Duration::from_nanos(80));
+        stats.record_mpi_alltoallv_payload_time(std::time::Duration::from_nanos(90));
+        stats.record_remote_packet_encode_time(std::time::Duration::from_nanos(100));
+        stats.record_remote_packet_decode_time(std::time::Duration::from_nanos(110));
+        stats.record_remote_packet_inbound_injection_time(std::time::Duration::from_nanos(120));
 
         let distributed = stats.distributed.lock().unwrap().clone();
         assert_eq!(distributed.remote_packets_sent, 2);
@@ -231,5 +307,19 @@ mod tests {
         assert_eq!(cut.payload_bytes_received, 200);
         assert_eq!(distributed.control_barrier_wait_count, 1);
         assert_eq!(distributed.control_barrier_wait_time_ns, 50);
+        assert_eq!(distributed.mpi_barrier_wait_count, 1);
+        assert_eq!(distributed.mpi_barrier_wait_time_ns, 60);
+        assert_eq!(distributed.mpi_allreduce_count, 1);
+        assert_eq!(distributed.mpi_allreduce_time_ns, 70);
+        assert_eq!(distributed.mpi_alltoall_sizes_count, 1);
+        assert_eq!(distributed.mpi_alltoall_sizes_time_ns, 80);
+        assert_eq!(distributed.mpi_alltoallv_payload_count, 1);
+        assert_eq!(distributed.mpi_alltoallv_payload_time_ns, 90);
+        assert_eq!(distributed.remote_packet_encode_count, 1);
+        assert_eq!(distributed.remote_packet_encode_time_ns, 100);
+        assert_eq!(distributed.remote_packet_decode_count, 1);
+        assert_eq!(distributed.remote_packet_decode_time_ns, 110);
+        assert_eq!(distributed.remote_packet_inbound_injection_count, 1);
+        assert_eq!(distributed.remote_packet_inbound_injection_time_ns, 120);
     }
 }

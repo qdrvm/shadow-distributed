@@ -714,9 +714,11 @@ impl WorkerShared {
             entry.0 += 1;
             entry.1 += packet.packet_payload_len();
         }
+        let injection_start = std::time::Instant::now();
         for packet in packets {
             self.push_inbound_remote_packet(packet)?;
         }
+        SIM_STATS.record_remote_packet_inbound_injection_time(injection_start.elapsed());
         SIM_STATS.record_remote_packets_received(count, payload_bytes);
         for (src_shard, (count, payload_bytes)) in cut_stats {
             SIM_STATS.record_remote_packet_cut_received(

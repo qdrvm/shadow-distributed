@@ -46,6 +46,15 @@ was removed during the merge to avoid duplicate Rust module definitions.
 - TCP MPI coverage includes a 2-rank smoke test and a repeated-run determinism
   comparison.
 
+### Performance instrumentation
+- Distributed stats now include aggregate MPI timing for `MPI_Barrier`,
+  `MPI_Allreduce(MIN)`, `MPI_Alltoall` size exchange, and `MPI_Alltoallv`
+  payload exchange.
+- Distributed stats include Shadow-side timing for remote packet batch encoding,
+  decoding, and inbound event injection.
+- The existing UDP distributed large-partition stats check verifies that the new
+  timing fields are emitted in shard `sim-stats.json` output.
+
 ## Verified
 
 ```text
@@ -54,6 +63,10 @@ cmake --build build -j16
 mpirun -np 2 build/src/main/shadow --version
 mpirun -np 2 build/src/main/shadow -d /tmp/opencode/shadow-mpi-smoke-* --parallelism 1 --progress false --log-level error --distributed-shard-count 2 --use-new-tcp true src/test/udp/udp-distributed.yaml
 ctest -L mpi --output-on-failure
+cargo test -p shadow-rs --lib core::sim_stats
+cargo test -p shadow-rs --lib core::distributed
+./setup build --test
+./setup test udp-distributed-large-partition --verbose
 ```
 
 Results:
@@ -62,6 +75,8 @@ Results:
 - Two-rank MPI UDP simulation succeeds with cross-shard packet exchange exercised.
 - Registered MPI CTests pass: TCP smoke, TCP determinism, UDP smoke, UDP 4-rank
   explicit partitioning, and UDP determinism.
+- Performance instrumentation unit tests and distributed stats output checks pass.
+- MPI shard stats include nonzero MPI timing totals after `ctest -L mpi`.
 
 ## Notes
 

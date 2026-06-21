@@ -246,7 +246,15 @@ pub(crate) mod mpi_backend {
 
     impl DistributedSynchronizer for MpiSynchronizer {
         fn wait(&self) -> Result<(), RemotePacketExchangeError> {
-            unsafe { check_mpi(ffi::MPI_Barrier(ffi::mpi_comm_world()), "MPI_Barrier") }
+            let start = std::time::Instant::now();
+            let result =
+                unsafe { check_mpi(ffi::MPI_Barrier(ffi::mpi_comm_world()), "MPI_Barrier") };
+            if result.is_ok() {
+                crate::core::worker::with_global_sim_stats(|stats| {
+                    stats.record_mpi_barrier_wait(start.elapsed())
+                });
+            }
+            result
         }
 
         fn wait_for_global_min_next_event(
@@ -262,7 +270,8 @@ pub(crate) mod mpi_backend {
             };
             let mut global_ns = 0;
 
-            unsafe {
+            let start = std::time::Instant::now();
+            let result = unsafe {
                 check_mpi(
                     ffi::MPI_Allreduce(
                         &local_ns as *const i64 as *const c_void,
@@ -273,8 +282,14 @@ pub(crate) mod mpi_backend {
                         ffi::mpi_comm_world(),
                     ),
                     "MPI_Allreduce(MIN)",
-                )?;
+                )
+            };
+            if result.is_ok() {
+                crate::core::worker::with_global_sim_stats(|stats| {
+                    stats.record_mpi_allreduce_time(start.elapsed())
+                });
             }
+            result?;
 
             if global_ns == i64::MAX {
                 Ok(EmulatedTime::MAX)
@@ -327,6 +342,7 @@ pub(crate) mod mpi_backend {
                 groups[dst_rank].push(packet.event);
             }
 
+            let encode_start = std::time::Instant::now();
             let encoded: Vec<Vec<u8>> = groups
                 .iter_mut()
                 .map(|group| {
@@ -334,6 +350,9 @@ pub(crate) mod mpi_backend {
                     encode_remote_packet_batch(group)
                 })
                 .collect::<Result<_, _>>()?;
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_remote_packet_encode_time(encode_start.elapsed())
+            });
 
             let send_sizes: Vec<u32> = encoded
                 .iter()
@@ -341,6 +360,7 @@ pub(crate) mod mpi_backend {
                 .collect();
             let mut recv_sizes = vec![0u32; size];
 
+            let alltoall_start = std::time::Instant::now();
             unsafe {
                 check_mpi(
                     ffi::MPI_Alltoall(
@@ -355,6 +375,9 @@ pub(crate) mod mpi_backend {
                     "MPI_Alltoall(sizes)",
                 )?;
             }
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_mpi_alltoall_sizes_time(alltoall_start.elapsed())
+            });
 
             let send_counts: Vec<i32> = send_sizes
                 .iter()
@@ -375,6 +398,7 @@ pub(crate) mod mpi_backend {
             }
             let mut recv_buf = vec![0; recv_total];
 
+            let alltoallv_start = std::time::Instant::now();
             unsafe {
                 check_mpi(
                     ffi::MPI_Alltoallv(
@@ -391,7 +415,11 @@ pub(crate) mod mpi_backend {
                     "MPI_Alltoallv(payloads)",
                 )?;
             }
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_mpi_alltoallv_payload_time(alltoallv_start.elapsed())
+            });
 
+            let decode_start = std::time::Instant::now();
             let mut all_events = Vec::new();
             for src_rank in 0..size {
                 let batch_size = recv_counts[src_rank] as usize;
@@ -405,6 +433,9 @@ pub(crate) mod mpi_backend {
                 )?;
                 all_events.extend(events);
             }
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_remote_packet_decode_time(decode_start.elapsed())
+            });
             all_events.sort_by(remote_packet_event_cmp);
             *self.pending_received.lock().unwrap() = all_events;
             Ok(())
@@ -821,7 +852,11 @@ impl RemotePacketExchange for UnixSocketRemotePacketExchange {
                     path.display()
                 ))
             })?;
+            let encode_start = std::time::Instant::now();
             let payload = encode_remote_packet_batch(&packets)?;
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_remote_packet_encode_time(encode_start.elapsed())
+            });
             stream.write_all(&payload).map_err(|e| {
                 RemotePacketExchangeError::Backend(format!(
                     "failed to write remote packet batch for shard {dst_shard:?}: {e}"
@@ -861,7 +896,11 @@ impl RemotePacketExchange for UnixSocketRemotePacketExchange {
                     "failed to read IPC packet batch for shard {shard:?}: {e}"
                 ))
             })?;
+            let decode_start = std::time::Instant::now();
             packets.extend(decode_remote_packet_batch(&payload, shard)?);
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_remote_packet_decode_time(decode_start.elapsed())
+            });
         }
 
         packets.sort_by(remote_packet_event_cmp);
