@@ -77,7 +77,364 @@ pub trait DistributedSynchronizer: Send + Sync {
 
 #[cfg(feature = "distributed_mpi")]
 pub(crate) mod mpi_backend {
-    pub(crate) use rsmpi as mpi;
+    use std::os::raw::{c_char, c_int, c_void};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use shadow_shim_helper_rs::emulated_time::EmulatedTime;
+    use shadow_shim_helper_rs::simulation_time::SimulationTime;
+
+    use super::{
+        DistributedSynchronizer, OutboundRemotePacket, RemotePacketEvent, RemotePacketExchange,
+        RemotePacketExchangeError, ShardId, decode_remote_packet_batch, encode_remote_packet_batch,
+        remote_packet_event_cmp,
+    };
+
+    #[allow(non_camel_case_types)]
+    mod ffi {
+        use super::{c_char, c_int, c_void};
+
+        pub type MPI_Comm = *mut c_void;
+        pub type MPI_Datatype = *mut c_void;
+        pub type MPI_Op = *mut c_void;
+
+        unsafe extern "C" {
+            pub static ompi_mpi_comm_world: c_void;
+            pub static ompi_mpi_int64_t: c_void;
+            pub static ompi_mpi_uint32_t: c_void;
+            pub static ompi_mpi_byte: c_void;
+            pub static ompi_mpi_op_min: c_void;
+        }
+
+        unsafe extern "C" {
+            pub fn MPI_Init(argc: *mut c_int, argv: *mut *mut *mut c_char) -> c_int;
+            pub fn MPI_Finalize() -> c_int;
+            pub fn MPI_Comm_rank(comm: MPI_Comm, rank: *mut c_int) -> c_int;
+            pub fn MPI_Comm_size(comm: MPI_Comm, size: *mut c_int) -> c_int;
+            pub fn MPI_Barrier(comm: MPI_Comm) -> c_int;
+            pub fn MPI_Allreduce(
+                sendbuf: *const c_void,
+                recvbuf: *mut c_void,
+                count: c_int,
+                datatype: MPI_Datatype,
+                op: MPI_Op,
+                comm: MPI_Comm,
+            ) -> c_int;
+            pub fn MPI_Alltoall(
+                sendbuf: *const c_void,
+                sendcount: c_int,
+                sendtype: MPI_Datatype,
+                recvbuf: *mut c_void,
+                recvcount: c_int,
+                recvtype: MPI_Datatype,
+                comm: MPI_Comm,
+            ) -> c_int;
+            pub fn MPI_Alltoallv(
+                sendbuf: *const c_void,
+                sendcounts: *const c_int,
+                sdispls: *const c_int,
+                sendtype: MPI_Datatype,
+                recvbuf: *mut c_void,
+                recvcounts: *const c_int,
+                rdispls: *const c_int,
+                recvtype: MPI_Datatype,
+                comm: MPI_Comm,
+            ) -> c_int;
+        }
+
+        pub fn mpi_comm_world() -> MPI_Comm {
+            unsafe { &ompi_mpi_comm_world as *const c_void as *mut c_void }
+        }
+
+        pub fn mpi_int64_t() -> MPI_Datatype {
+            unsafe { &ompi_mpi_int64_t as *const c_void as *mut c_void }
+        }
+
+        pub fn mpi_uint32_t() -> MPI_Datatype {
+            unsafe { &ompi_mpi_uint32_t as *const c_void as *mut c_void }
+        }
+
+        pub fn mpi_byte() -> MPI_Datatype {
+            unsafe { &ompi_mpi_byte as *const c_void as *mut c_void }
+        }
+
+        pub fn mpi_min() -> MPI_Op {
+            unsafe { &ompi_mpi_op_min as *const c_void as *mut c_void }
+        }
+    }
+
+    static MPI_INITIALIZED: AtomicBool = AtomicBool::new(false);
+    static MPI_UNIVERSE: OnceLock<MpiUniverse> = OnceLock::new();
+
+    struct MpiUniverse {
+        rank: i32,
+        size: i32,
+    }
+
+    impl MpiUniverse {
+        fn get() -> Result<&'static Self, RemotePacketExchangeError> {
+            MPI_UNIVERSE.get().ok_or_else(|| {
+                RemotePacketExchangeError::Backend("MPI is not initialized".to_string())
+            })
+        }
+    }
+
+    fn check_mpi(rc: i32, context: &str) -> Result<(), RemotePacketExchangeError> {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(RemotePacketExchangeError::Backend(format!(
+                "MPI error in {context}: code {rc}"
+            )))
+        }
+    }
+
+    pub fn initialize_mpi() -> Result<(), RemotePacketExchangeError> {
+        if MPI_INITIALIZED.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        unsafe {
+            check_mpi(
+                ffi::MPI_Init(std::ptr::null_mut(), std::ptr::null_mut()),
+                "MPI_Init",
+            )?;
+        }
+
+        let mut rank = 0;
+        let mut size = 0;
+        unsafe {
+            check_mpi(
+                ffi::MPI_Comm_rank(ffi::mpi_comm_world(), &mut rank),
+                "MPI_Comm_rank",
+            )?;
+            check_mpi(
+                ffi::MPI_Comm_size(ffi::mpi_comm_world(), &mut size),
+                "MPI_Comm_size",
+            )?;
+        }
+
+        MPI_UNIVERSE.set(MpiUniverse { rank, size }).map_err(|_| {
+            RemotePacketExchangeError::Backend("MPI already initialized".to_string())
+        })?;
+        MPI_INITIALIZED.store(true, Ordering::SeqCst);
+        log::info!("MPI initialized: rank {rank} of {size}");
+        Ok(())
+    }
+
+    pub fn mpi_rank_size() -> Result<(i32, i32), RemotePacketExchangeError> {
+        let universe = MpiUniverse::get()?;
+        Ok((universe.rank, universe.size))
+    }
+
+    pub fn finalize_mpi() {
+        if MPI_INITIALIZED.load(Ordering::SeqCst) {
+            unsafe {
+                ffi::MPI_Finalize();
+            }
+        }
+    }
+
+    pub struct MpiSynchronizer;
+
+    impl MpiSynchronizer {
+        pub fn new() -> Result<Self, RemotePacketExchangeError> {
+            let _ = MpiUniverse::get()?;
+            Ok(Self)
+        }
+    }
+
+    impl DistributedSynchronizer for MpiSynchronizer {
+        fn wait(&self) -> Result<(), RemotePacketExchangeError> {
+            unsafe { check_mpi(ffi::MPI_Barrier(ffi::mpi_comm_world()), "MPI_Barrier") }
+        }
+
+        fn wait_for_global_min_next_event(
+            &self,
+            local_min_next_event_time: EmulatedTime,
+        ) -> Result<EmulatedTime, RemotePacketExchangeError> {
+            let local_ns = if local_min_next_event_time == EmulatedTime::MAX {
+                i64::MAX
+            } else {
+                local_min_next_event_time
+                    .duration_since(&EmulatedTime::SIMULATION_START)
+                    .as_nanos() as i64
+            };
+            let mut global_ns = 0;
+
+            unsafe {
+                check_mpi(
+                    ffi::MPI_Allreduce(
+                        &local_ns as *const i64 as *const c_void,
+                        &mut global_ns as *mut i64 as *mut c_void,
+                        1,
+                        ffi::mpi_int64_t(),
+                        ffi::mpi_min(),
+                        ffi::mpi_comm_world(),
+                    ),
+                    "MPI_Allreduce(MIN)",
+                )?;
+            }
+
+            if global_ns == i64::MAX {
+                Ok(EmulatedTime::MAX)
+            } else {
+                Ok(EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(global_ns as u64))
+            }
+        }
+    }
+
+    pub struct MpiRemotePacketExchange {
+        rank: i32,
+        size: i32,
+        pending_received: Mutex<Vec<RemotePacketEvent>>,
+    }
+
+    impl MpiRemotePacketExchange {
+        pub fn new() -> Result<Self, RemotePacketExchangeError> {
+            let universe = MpiUniverse::get()?;
+            Ok(Self {
+                rank: universe.rank,
+                size: universe.size,
+                pending_received: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl RemotePacketExchange for MpiRemotePacketExchange {
+        fn send(
+            &self,
+            packets: Vec<OutboundRemotePacket>,
+        ) -> Result<(), RemotePacketExchangeError> {
+            let size = usize::try_from(self.size).map_err(|_| {
+                RemotePacketExchangeError::Backend(format!("invalid MPI world size {}", self.size))
+            })?;
+            let mut groups: Vec<Vec<RemotePacketEvent>> = vec![Vec::new(); size];
+
+            for packet in packets {
+                let dst_rank = usize::try_from(packet.dst_shard.0).map_err(|_| {
+                    RemotePacketExchangeError::Backend(format!(
+                        "invalid destination shard {:?}",
+                        packet.dst_shard
+                    ))
+                })?;
+                if dst_rank >= size {
+                    return Err(RemotePacketExchangeError::Backend(format!(
+                        "destination shard {:?} exceeds MPI world size {size}",
+                        packet.dst_shard
+                    )));
+                }
+                groups[dst_rank].push(packet.event);
+            }
+
+            let encoded: Vec<Vec<u8>> = groups
+                .iter_mut()
+                .map(|group| {
+                    group.sort_by(remote_packet_event_cmp);
+                    encode_remote_packet_batch(group)
+                })
+                .collect::<Result<_, _>>()?;
+
+            let send_sizes: Vec<u32> = encoded
+                .iter()
+                .map(|batch| u32::try_from(batch.len()).expect("remote packet batch too large"))
+                .collect();
+            let mut recv_sizes = vec![0u32; size];
+
+            unsafe {
+                check_mpi(
+                    ffi::MPI_Alltoall(
+                        send_sizes.as_ptr() as *const c_void,
+                        1,
+                        ffi::mpi_uint32_t(),
+                        recv_sizes.as_mut_ptr() as *mut c_void,
+                        1,
+                        ffi::mpi_uint32_t(),
+                        ffi::mpi_comm_world(),
+                    ),
+                    "MPI_Alltoall(sizes)",
+                )?;
+            }
+
+            let send_counts: Vec<i32> = send_sizes
+                .iter()
+                .map(|&x| i32::try_from(x).expect("MPI send batch too large"))
+                .collect();
+            let recv_counts: Vec<i32> = recv_sizes
+                .iter()
+                .map(|&x| i32::try_from(x).expect("MPI receive batch too large"))
+                .collect();
+            let send_displs = displacements(&send_counts)?;
+            let recv_displs = displacements(&recv_counts)?;
+            let send_total: usize = send_counts.iter().map(|&x| x as usize).sum();
+            let recv_total: usize = recv_counts.iter().map(|&x| x as usize).sum();
+
+            let mut send_buf = Vec::with_capacity(send_total);
+            for batch in &encoded {
+                send_buf.extend_from_slice(batch);
+            }
+            let mut recv_buf = vec![0; recv_total];
+
+            unsafe {
+                check_mpi(
+                    ffi::MPI_Alltoallv(
+                        send_buf.as_ptr() as *const c_void,
+                        send_counts.as_ptr(),
+                        send_displs.as_ptr(),
+                        ffi::mpi_byte(),
+                        recv_buf.as_mut_ptr() as *mut c_void,
+                        recv_counts.as_ptr(),
+                        recv_displs.as_ptr(),
+                        ffi::mpi_byte(),
+                        ffi::mpi_comm_world(),
+                    ),
+                    "MPI_Alltoallv(payloads)",
+                )?;
+            }
+
+            let mut all_events = Vec::new();
+            for src_rank in 0..size {
+                let batch_size = recv_counts[src_rank] as usize;
+                if batch_size == 0 {
+                    continue;
+                }
+                let offset = recv_displs[src_rank] as usize;
+                let events = decode_remote_packet_batch(
+                    &recv_buf[offset..offset + batch_size],
+                    ShardId(src_rank as u32),
+                )?;
+                all_events.extend(events);
+            }
+            all_events.sort_by(remote_packet_event_cmp);
+            *self.pending_received.lock().unwrap() = all_events;
+            Ok(())
+        }
+
+        fn receive(
+            &self,
+            shard: ShardId,
+        ) -> Result<Vec<RemotePacketEvent>, RemotePacketExchangeError> {
+            if shard.0 != self.rank as u32 {
+                return Err(RemotePacketExchangeError::Backend(format!(
+                    "MPI rank {} cannot receive packets for shard {:?}",
+                    self.rank, shard
+                )));
+            }
+            Ok(std::mem::take(&mut *self.pending_received.lock().unwrap()))
+        }
+    }
+
+    fn displacements(counts: &[i32]) -> Result<Vec<i32>, RemotePacketExchangeError> {
+        let mut total = 0i32;
+        let mut displacements = Vec::with_capacity(counts.len());
+        for &count in counts {
+            displacements.push(total);
+            total = total.checked_add(count).ok_or_else(|| {
+                RemotePacketExchangeError::Backend("MPI Alltoallv payload too large".to_string())
+            })?;
+        }
+        Ok(displacements)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

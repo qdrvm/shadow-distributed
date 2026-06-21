@@ -37,12 +37,24 @@ impl<'a> Controller<'a> {
         let end_time: SimulationTime = end_time.try_into().unwrap();
         let end_time = EmulatedTime::SIMULATION_START + end_time;
 
+        #[cfg(feature = "distributed_mpi")]
+        let distributed_control = if config.experimental.distributed_shard_count.unwrap() > 1 {
+            Some(Box::new(
+                crate::core::distributed::mpi_backend::MpiSynchronizer::new()
+                    .expect("MPI synchronizer init failed"),
+            ) as Box<dyn DistributedSynchronizer>)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "distributed_mpi"))]
+        let distributed_control = None;
+
         Self {
             config,
             sim_config: Some(sim_config),
             end_time,
             distributed_ipc_socket_dir: None,
-            distributed_control: None,
+            distributed_control,
         }
     }
 
@@ -104,6 +116,13 @@ impl<'a> Controller<'a> {
         current_shard: ShardId,
     ) -> anyhow::Result<Box<dyn RemotePacketExchange>> {
         let Some(socket_dir) = self.distributed_ipc_socket_dir.as_ref() else {
+            #[cfg(feature = "distributed_mpi")]
+            if self.config.experimental.distributed_shard_count.unwrap() > 1 {
+                return Ok(Box::new(
+                    crate::core::distributed::mpi_backend::MpiRemotePacketExchange::new()?,
+                ));
+            }
+
             return Ok(Box::new(NoopRemotePacketExchange));
         };
 

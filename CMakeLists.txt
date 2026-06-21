@@ -162,6 +162,7 @@ endif()
 
 if(SHADOW_USE_MPI STREQUAL ON)
     message(STATUS "MPI support enabled")
+    find_package(MPI REQUIRED)
 endif()
 
 if($ENV{VERBOSE})

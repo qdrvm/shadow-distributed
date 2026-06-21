@@ -407,4 +407,33 @@ fn main() {
     build_remora(&build_common);
 
     println!("cargo:rustc-env=SHADOW_BUILD_INFO={}", build_info());
+
+    link_mpi_if_enabled();
+}
+
+fn link_mpi_if_enabled() {
+    // In build scripts, #[cfg(feature = "...")] doesn't work; Cargo sets
+    // CARGO_FEATURE_<name> env vars for the target package's features.
+    let mpi_enabled = std::env::var("CARGO_FEATURE_DISTRIBUTED_MPI").is_ok();
+    if !mpi_enabled {
+        return;
+    }
+
+    // Use pkg-config to find the library path.
+    if let Ok(libs) = std::process::Command::new("pkg-config")
+        .args(["--libs", "ompi-c"])
+        .output()
+    {
+        let libs_str = String::from_utf8_lossy(&libs.stdout);
+        for part in libs_str.split_whitespace() {
+            if let Some(lib) = part.strip_prefix("-l") {
+                println!("cargo:rustc-link-lib={lib}");
+            } else if let Some(path) = part.strip_prefix("-L") {
+                println!("cargo:rustc-link-search=native={path}");
+            }
+        }
+    } else {
+        // Fallback: link directly
+        println!("cargo:rustc-link-lib=mpi");
+    }
 }

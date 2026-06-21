@@ -2,86 +2,61 @@
 
 ## Current Status
 
-Phase 4 (MPI Cluster Backend) is **complete and tested**. The distributed simulation
-runs across multiple MPI ranks with cross-shard UDP packet delivery verified
-end-to-end.
+The `worktree-snuggly-seeking-pumpkin` branch has been merged with `origin/main` and
+keeps the verified MPI distributed packet exchange fixes.
+
+The merged code uses `origin/main`'s flat distributed module at
+`src/main/core/distributed.rs`. The old `src/main/core/distributed/` directory module
+was removed during the merge to avoid duplicate Rust module definitions.
 
 ## Implemented
 
-### Core distributed types (`src/main/core/distributed/mod.rs`)
-- `ShardId`, `PartitionMap` (modulo + YAML partition file)
-- `SerializedPacket` (deterministic big-endian binary format for UDP/Rust TCP)
-- `RemotePacketEvent` (versioned batch encode/decode with SHRB magic)
-- `RemotePacketDelivery`, error types
-- 22 unit tests
+### Distributed core
+- `ShardId`, `PartitionMap`, `RemotePacketEvent`, `SerializedPacket`, and exchange/control
+  types now live in `src/main/core/distributed.rs`.
+- `ManagerConfig::from_sim_config()` filters execution to local hosts while preserving DNS
+  records for all configured hosts.
+- `WorkerShared` stages remote packets as `OutboundRemotePacket { dst_shard, event }`, so
+  routing uses the configured partition map rather than host-id modulo.
 
-### Synchronizer trait (`src/main/core/distributed/synchronizer.rs`)
-- `DistributedSynchronizer` trait: `wait()` + `global_min_next_event()`
-- `SingleShardSynchronizer` (no-op default)
-- `UnixSocketSynchronizer` (binary "SCTL" protocol over Unix sockets)
-
-### Exchange trait (`src/main/core/distributed/exchange.rs`)
-- `RemotePacketExchange` trait: `send()` + `receive()`
-- `NoopRemotePacketExchange` (fail-fast on remote packets)
-- `InProcessRemotePacketExchange` (Arc-shareable, test backend)
-- `UnixSocketRemotePacketExchange` (one socket per shard)
-- `DistributedPacketExchangeContext` (temp/external socket directories)
-- 12 unit tests
-
-### MPI backend (`src/main/core/distributed/mpi_backend.rs`)
-- Feature-gated: `distributed_mpi` (Cargo) ↔ `SHADOW_USE_MPI` (CMake)
-- Direct FFI to libmpi (OpenMPI 4.1.x compatible, 64-bit pointer types)
-- `MpiSynchronizer`: `MPI_Barrier` + `MPI_Allreduce(MPI_MIN)` on i64 nanos
-- `MpiRemotePacketExchange`: `MPI_Alltoall` for size exchange, ordered `MPI_Send`/`MPI_Recv`
-- `initialize_mpi()` / `finalize_mpi()` lifecycle
-- MPI rank auto-detected; overrides CLI shard_id
-- Data directory rewritten to `<base>.shard-N` per rank
-
-### Packet serialization and reconstruction
-- `serialize_packet_for_remote()`: `PacketRc` → `SerializedPacket` (UDP + Rust TCP)
-- `deserialize_packet_from_remote()`: `SerializedPacket` → `PacketRc` (full UDP/TCP fields)
-- `Event::new_packet_with_meta()`: preserves source host/event metadata on receive
-- Legacy C TCP rejected with clear error
-
-### Existing code integration
-- **configuration.rs**: Hidden `--distributed-shard-*` CLI options
-- **sim_config.rs**: Global host IDs, PartitionMap, `use_new_tcp` enforcement
-- **worker.rs**: `WorkerShared` distributed state, remote packet staging/routing,
-  exchange send/receive, packet reconstruction on receive
-- **manager.rs**: DNS from all hosts, local-only host execution, exchange calls
-  per scheduling window, global window advancement with runahead
-- **controller.rs**: MPI backend auto-selection when shard_count > 1
-- **event.rs**: `Event::new_packet_with_meta` for source metadata preservation
-- **shadow.rs**: Feature-gated MPI init/finalize, rank → shard_id, data dir rewrite
+### MPI backend
+- Feature-gated by Cargo feature `distributed_mpi`, enabled from CMake option
+  `SHADOW_USE_MPI=ON`.
+- Uses direct libmpi FFI and links `MPI_C_LIBRARIES` through CMake.
+- `MpiRemotePacketExchange` uses `MPI_Alltoall` for per-rank payload sizes and
+  `MPI_Alltoallv` for payload exchange, avoiding the old ordered blocking send/recv
+  deadlock.
+- `MpiSynchronizer` uses `MPI_Barrier` and `MPI_Allreduce(MPI_MIN)` for global next-event
+  synchronization.
+- MPI rank/size override `distributed_shard_id` and `distributed_shard_count`, and each rank
+  writes to `<data_directory>.shard-N`.
+- MPI-launched runs bypass `origin/main`'s local subprocess launcher, preserving one Shadow
+  process per MPI rank.
 
 ### Build system
-- `SHADOW_USE_MPI` CMake option (default OFF)
-- `distributed_mpi` Cargo feature (default OFF)
-- `WORKSPACE_FEATURES` variable prevents shim crate from getting MPI feature
-- `build.rs` detects feature via `CARGO_FEATURE_DISTRIBUTED_MPI` env var
-- CMake links `MPI_C_LIBRARIES` into shadow executable
+- Top-level CMake finds MPI when `SHADOW_USE_MPI=ON`.
+- `WORKSPACE_FEATURES` passes `distributed_mpi` only to the workspace/main Rust build.
+- The shim remains on common `RUST_FEATURES`, since it does not define `distributed_mpi`.
 
-### End-to-end tests
-- `udp-distributed-mpi-shadow` (CTest #46): 2-rank, **PASSES** (0.74s)
-- `udp-distributed-mpi-4-shadow` (CTest #47): 4-rank, **PASSES** (0.60s)
-- Cross-shard UDP delivery verified: `sendto`/`recvfrom` syscalls
-- Both tests use `--oversubscribe` for single-machine execution
+## Verified
 
-## Verification Status
-
-```
-cargo check -p shadow-rs --lib                              ✓ compiles
-cargo check -p shadow-rs --lib --features distributed_mpi   ✓ compiles
-cargo test -p shadow-rs --lib                               186 passed
-ctest -R udp-distributed-mpi                                2/2 passed (1.30s)
+```text
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSHADOW_TEST=ON -DSHADOW_USE_MPI=ON -DSHADOW_WERROR=OFF
+cmake --build build -j16
+mpirun -np 2 build/src/main/shadow --version
+mpirun -np 2 build/src/main/shadow -d /tmp/opencode/shadow-mpi-smoke-* --parallelism 1 --progress false --log-level error --distributed-shard-count 2 --use-new-tcp true src/test/udp/udp-distributed.yaml
 ```
 
-## Next Steps (Phase 5+)
+Results:
+- MPI-enabled build succeeds.
+- Two-rank MPI `--version` smoke test succeeds.
+- Two-rank MPI UDP simulation succeeds with cross-shard packet exchange exercised.
 
-1. TCP distributed tests (requires `experimental.use_new_tcp=true`)
-2. Partition file support for explicit host→shard assignment
-3. Global dynamic runahead (min used latency across all shards)
-4. Multi-machine testing (beyond `--oversubscribe`)
-5. Phase 5: Partitioning and lookahead
-6. Phase 6: Routing and topology scalability
-7. Phase 7: Ethereum direct-execution harness
+## Notes
+
+- The registered distributed CTest tests from `origin/main` are local-subprocess distributed
+  tests, not MPI tests.
+- The previous explicit-partition `ethlambda` scenario should continue to use the configured
+  `distributed_partition_file`; packet routing now flows through `OutboundRemotePacket.dst_shard`.
+- Worker hosts still need the merged source rebuilt/synced before rerunning the 4-host
+  `ethlambda` simulation.

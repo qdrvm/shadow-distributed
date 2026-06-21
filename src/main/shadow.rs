@@ -107,7 +107,7 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         .with_context(|| format!("Failed to load configuration file {config_filename}"))?;
 
     // generate the final shadow configuration from the config file and cli options
-    let shadow_config = ConfigOptions::new(config_file, options.clone());
+    let mut shadow_config = ConfigOptions::new(config_file, options.clone());
 
     if options.show_config {
         eprintln!("{shadow_config:#?}");
@@ -143,7 +143,14 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     let distributed_shard_count = shadow_config.experimental.distributed_shard_count.unwrap();
-    if distributed_shard_count > 1 && options.distributed_ipc_socket_dir.is_none() {
+    let is_mpi_distributed_process = cfg!(feature = "distributed_mpi")
+        && (std::env::var_os("OMPI_COMM_WORLD_SIZE").is_some()
+            || std::env::var_os("PMI_SIZE").is_some()
+            || std::env::var_os("PMIX_RANK").is_some());
+    if distributed_shard_count > 1
+        && options.distributed_ipc_socket_dir.is_none()
+        && !is_mpi_distributed_process
+    {
         return launch_distributed_shards(&args, &options, &shadow_config, distributed_shard_count);
     }
 
@@ -208,6 +215,34 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     // log some information
+    // Initialize MPI if running in distributed MPI mode.
+    #[cfg(feature = "distributed_mpi")]
+    if shadow_config.experimental.distributed_shard_count.unwrap() > 1 {
+        crate::core::distributed::mpi_backend::initialize_mpi()
+            .context("Failed to initialize MPI for distributed mode")?;
+
+        // Override shard_id from MPI rank. The MPI init sets up rank/size,
+        // but the config still has the default shard_id (0) or whatever was
+        // passed on the CLI. In MPI mode, each process should use its MPI rank
+        // as its shard id.
+        let (rank, size) = crate::core::distributed::mpi_backend::mpi_rank_size()
+            .context("Failed to get MPI rank/size")?;
+        shadow_config.experimental.distributed_shard_id = Some(rank as u32);
+        shadow_config.experimental.distributed_shard_count = Some(size as u32);
+
+        // Rewrite the data directory to <base>.shard-N so each rank writes
+        // to a distinct output directory, avoiding filesystem races.
+        let orig_dir = shadow_config
+            .general
+            .data_directory
+            .as_ref()
+            .unwrap()
+            .clone();
+        let shard_dir = format!("{}.shard-{rank}", orig_dir);
+        shadow_config.general.data_directory = Some(shard_dir.clone());
+        log::info!("MPI distributed mode: rank={rank} size={size} data_directory={shard_dir}");
+    }
+
     eprintln!("** Starting Shadow {}", env!("CARGO_PKG_VERSION"));
     let mut build_info = Vec::new();
     write_build_info(&mut build_info).unwrap();
@@ -246,7 +281,15 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     // run the simulation
-    controller.run().context("Failed to run the simulation")?;
+    let result = controller.run().context("Failed to run the simulation");
+
+    // Finalize MPI if running in distributed MPI mode
+    #[cfg(feature = "distributed_mpi")]
+    {
+        crate::core::distributed::mpi_backend::finalize_mpi();
+    }
+
+    let () = result?;
 
     // disable log buffering
     shadow_logger::set_buffering_enabled(false);

@@ -7,8 +7,10 @@ if(SHADOW_USE_PERF_TIMERS STREQUAL ON)
   set(RUST_FEATURES "${RUST_FEATURES} perf_timers")
 endif()
 
+set(WORKSPACE_FEATURES "${RUST_FEATURES}")
 if(SHADOW_USE_MPI STREQUAL ON)
-  set(RUST_FEATURES "${RUST_FEATURES} distributed_mpi")
+  # Only the main Rust crate defines distributed_mpi; the shim does not.
+  set(WORKSPACE_FEATURES "${WORKSPACE_FEATURES} distributed_mpi")
 endif()
 
 if(SHADOW_EXTRA_TESTS STREQUAL ON)
@@ -59,7 +61,7 @@ ExternalProject_Add(
         ${RUST_BUILD_FLAG} \
         ${RUST_TARGETS} \
         --target-dir \"${TARGETDIR}\" \
-        --features \"${RUST_FEATURES}\" \
+        --features \"${WORKSPACE_FEATURES}\" \
         "
     COMMAND echo "Building shadow-tests..."
     # Always build shadow-tests with the debug profile, even when shadow is built in release mode.
@@ -107,7 +109,7 @@ add_test(NAME rust-unit-tests
             ${RUST_BUILD_FLAG} \
             --manifest-path \"${CMAKE_CURRENT_SOURCE_DIR}\"/Cargo.toml \
             --target-dir \"${TARGETDIR}\" \
-            --features \"${RUST_FEATURES}\" \
+            --features \"${WORKSPACE_FEATURES}\" \
             "
          )
 # Longer timeout here and run serially, since it's running a whole test suite,
