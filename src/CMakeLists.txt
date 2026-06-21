@@ -7,20 +7,10 @@ if(SHADOW_USE_PERF_TIMERS STREQUAL ON)
   set(RUST_FEATURES "${RUST_FEATURES} perf_timers")
 endif()
 
+set(WORKSPACE_FEATURES "${RUST_FEATURES}")
 if(SHADOW_USE_MPI STREQUAL ON)
-  # Find MPI
-  find_package(MPI REQUIRED)
-  if(MPI_FOUND)
-    message(STATUS "MPI found: ${MPI_C_INCLUDE_DIRS} ${MPI_C_LIBRARIES}")
-    # Only add distributed_mpi to the workspace (shadow-rs) build, not the shim.
-    # The shim crate doesn't define this feature.
-    set(WORKSPACE_FEATURES "${RUST_FEATURES} distributed_mpi")
-    set(RUST_CFLAGS "${RUST_CFLAGS} ${MPI_C_INCLUDE_DIRS}")
-  else()
-    message(FATAL_ERROR "SHADOW_USE_MPI=ON but MPI was not found")
-  endif()
-else()
-  set(WORKSPACE_FEATURES "${RUST_FEATURES}")
+  # Only the main Rust crate defines distributed_mpi; the shim does not.
+  set(WORKSPACE_FEATURES "${WORKSPACE_FEATURES} distributed_mpi")
 endif()
 
 if(SHADOW_EXTRA_TESTS STREQUAL ON)

@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::Parser;
@@ -86,6 +87,11 @@ pub struct CliOptions {
 
     #[clap(flatten)]
     pub experimental: ExperimentalOptions,
+
+    /// Internal distributed-mode IPC socket directory for shard child processes.
+    #[clap(hide = true)]
+    #[clap(long, value_name = "path")]
+    pub distributed_ipc_socket_dir: Option<PathBuf>,
 }
 
 /// Options contained in a configuration file.
@@ -527,29 +533,23 @@ pub struct ExperimentalOptions {
     #[clap(help = EXP_HELP.get("native_preemption_sim_interval").unwrap().as_str())]
     pub native_preemption_sim_interval: Option<units::Time<units::TimePrefix>>,
 
-    /// Number of distributed shards (1 = single-process, non-distributed).
-    /// Hidden — only used for distributed multi-process simulation.
+    /// Hidden distributed-mode shard id. This is incomplete and intended for internal testing only.
     #[clap(hide = true)]
-    #[clap(long, value_name = "N")]
-    pub distributed_shard_count: Option<u32>,
-
-    /// The shard id for this process (0-indexed, < shard_count).
-    /// Hidden — set by the launcher.
-    #[clap(hide = true)]
-    #[clap(long, value_name = "N")]
+    #[clap(long, value_name = "id")]
+    #[clap(help = EXP_HELP.get("distributed_shard_id").unwrap().as_str())]
     pub distributed_shard_id: Option<u32>,
 
-    /// Path to the distributed IPC socket directory.
-    /// Hidden — set by the launcher.
+    /// Hidden distributed-mode shard count. This is incomplete and intended for internal testing only.
     #[clap(hide = true)]
-    #[clap(long, value_name = "path")]
-    pub distributed_ipc_socket_dir: Option<String>,
+    #[clap(long, value_name = "count")]
+    #[clap(help = EXP_HELP.get("distributed_shard_count").unwrap().as_str())]
+    pub distributed_shard_count: Option<u32>,
 
-    /// Path to an explicit partition file (YAML mapping hostnames → shard ids).
-    /// Hidden.
+    /// Hidden distributed-mode partition file mapping hostnames to shard ids.
     #[clap(hide = true)]
     #[clap(long, value_name = "path")]
-    pub distributed_partition_file: Option<String>,
+    #[clap(help = EXP_HELP.get("distributed_partition_file").unwrap().as_str())]
+    pub distributed_partition_file: Option<PathBuf>,
 }
 
 impl ExperimentalOptions {
@@ -600,9 +600,8 @@ impl Default for ExperimentalOptions {
                 units::TimePrefix::Milli,
             )),
             native_preemption_sim_interval: Some(units::Time::new(10, units::TimePrefix::Milli)),
-            distributed_shard_count: Some(1),
             distributed_shard_id: Some(0),
-            distributed_ipc_socket_dir: None,
+            distributed_shard_count: Some(1),
             distributed_partition_file: None,
         }
     }

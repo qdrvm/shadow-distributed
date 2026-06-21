@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +15,10 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 
 use super::work::event_queue::EventQueue;
 use crate::core::controller::ShadowStatusBarState;
-use crate::core::distributed::{PartitionMap, RemotePacketEvent, SerializedPacket, ShardId};
+use crate::core::distributed::{
+    OutboundRemotePacketBuffer, PartitionMap, RemotePacketDeliveryError, RemotePacketEvent,
+    RemotePacketExchange, RemotePacketExchangeError, ShardId,
+};
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::Bandwidth;
 use crate::core::sim_stats::{LocalSimStats, SharedSimStats};
@@ -351,6 +354,15 @@ impl Worker {
             return;
         };
 
+        let destination_shard = Worker::with(|w| {
+            w.shared
+                .partition_map
+                .shard_for_host(dst_host_id)
+                .unwrap_or_else(|| panic!("No shard owns destination host {dst_host_id:?}"))
+        })
+        .unwrap();
+        let current_shard = Worker::with(|w| w.shared.current_shard).unwrap();
+
         let src_ip = std::net::IpAddr::V4(src_ip);
         let dst_ip = std::net::IpAddr::V4(dst_ip);
 
@@ -373,6 +385,9 @@ impl Worker {
         Worker::update_lowest_used_latency(delay);
         Worker::with(|w| w.shared.increment_packet_count(src_ip, dst_ip)).unwrap();
 
+        // TODO: this should change for sending to remote manager (on a different machine); this is
+        // the only place where tasks are sent between separate host
+
         packetrc.add_status(PacketStatus::InetSent);
 
         // delay the packet until the next round
@@ -385,59 +400,31 @@ impl Worker {
         // round and calculated its min event time, so we put this in our min event time instead
         Worker::update_next_event_time(deliver_time);
 
-        // Check if the destination host is local or remote
-        let is_local = Worker::with(|w| {
-            w.shared
-                .partition_map
-                .is_host_local(dst_host_id, w.shared.shard_id)
-        })
-        .unwrap_or(true); // default to local if worker not available
-
-        if !is_local {
-            // Remote destination: serialize a RemotePacketEvent and stage it
-            let src_host_id = src_host.id();
-            let src_event_id = Worker::with(|w| w.shared.next_src_event_id()).unwrap_or(0);
-
-            // Try to serialize the packet
-            let serialized = serialize_packet_for_remote(&packetrc);
-
-            match serialized {
-                Ok(packet) => {
-                    log::trace!(
-                        "Staging remote packet: src={:?} dst={:?}",
-                        src_host_id,
-                        dst_host_id
-                    );
-                    let event = RemotePacketEvent {
-                        deliver_time,
-                        src_host_id,
-                        src_host_event_id: src_event_id,
-                        dst_host_id,
-                        packet,
-                    };
-                    Worker::with(|w| {
-                        w.shared.outbound_remote_packets.lock().unwrap().push(event);
-                    });
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to serialize packet for remote delivery: {e}. \
-                         Dropping packet from {} to {}.",
-                        src_host.info().name,
-                        dst_ip
-                    );
-                    packetrc.add_status(PacketStatus::InetDropped);
-                }
-            }
-            return;
-        }
-
-        // Local destination: use the existing event queue path
         // copy the packet (except the payload) so the dst gets its own header info
         let dst_packet = packetrc.new_copy_inner();
+        let src_host_id = src_host.id();
+        let src_host_event_id = src_host.get_new_event_id();
+
+        if destination_shard != current_shard {
+            let remote_event = RemotePacketEvent::new(
+                deliver_time,
+                src_host_id,
+                src_host_event_id,
+                dst_host_id,
+                &dst_packet,
+            )
+            .unwrap_or_else(|e| panic!("Failed to serialize remote packet: {e}"));
+            Worker::with(|w| w.shared.push_remote_packet(destination_shard, remote_event)).unwrap();
+            return;
+        }
         Worker::with(|w| {
-            w.shared
-                .push_packet_to_host(dst_packet, dst_host_id, deliver_time, src_host)
+            w.shared.push_packet_to_host(
+                dst_packet,
+                dst_host_id,
+                deliver_time,
+                src_host_id,
+                src_host_event_id,
+            )
         })
         .unwrap();
     }
@@ -541,6 +528,9 @@ pub struct WorkerShared {
     pub ip_assignment: IpAssignment<u32>,
     pub routing_info: RoutingInfo<u32>,
     pub host_bandwidths: HashMap<std::net::IpAddr, Bandwidth>,
+    pub current_shard: ShardId,
+    pub partition_map: PartitionMap,
+    pub outbound_remote_packets: OutboundRemotePacketBuffer,
     pub dns: Dns,
     // allows for easy updating of the status bar's state
     pub status_logger_state: Option<Arc<status_bar::Status<ShadowStatusBarState>>>,
@@ -553,11 +543,6 @@ pub struct WorkerShared {
     pub event_queues: HashMap<HostId, Arc<Mutex<EventQueue>>>,
     pub bootstrap_end_time: EmulatedTime,
     pub sim_end_time: EmulatedTime,
-    // Distributed simulation fields
-    pub partition_map: PartitionMap,
-    pub shard_id: ShardId,
-    /// Outbound remote packet staging buffer (thread-safe).
-    pub outbound_remote_packets: Arc<Mutex<Vec<RemotePacketEvent>>>,
 }
 
 impl WorkerShared {
@@ -650,242 +635,98 @@ impl WorkerShared {
         packet: PacketRc,
         dst_host_id: HostId,
         time: EmulatedTime,
-        src_host: &Host,
+        src_host_id: HostId,
+        src_host_event_id: u64,
     ) {
-        let event = Event::new_packet(packet, time, src_host);
+        let event = Event::new_packet_with_meta(packet, time, src_host_id, src_host_event_id);
         let event_queue = self.event_queues.get(&dst_host_id).unwrap();
         event_queue.lock().unwrap().push(event);
     }
 
-    /// Generate the next source-host event ID for remote packet metadata.
-    pub fn next_src_event_id(&self) -> u64 {
-        static NEXT_ID: Lazy<std::sync::atomic::AtomicU64> =
-            Lazy::new(|| std::sync::atomic::AtomicU64::new(0));
-        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    pub fn push_remote_packet(&self, dst_shard: ShardId, event: RemotePacketEvent) {
+        self.outbound_remote_packets.push(dst_shard, event);
     }
 
-    /// Drain outbound remote packets in deterministic order and send via the exchange.
-    /// Always calls `exchange.send()` even when there are no outbound events,
-    /// because MPI collectives require all ranks to participate.
+    pub fn push_inbound_remote_packet(
+        &self,
+        event: RemotePacketEvent,
+    ) -> Result<(), RemotePacketDeliveryError> {
+        let (dst_host_id, event) =
+            event.into_local_event(self.current_shard, &self.partition_map)?;
+        let event_queue = self.event_queues.get(&dst_host_id).unwrap();
+        event_queue.lock().unwrap().push(event);
+        Ok(())
+    }
+
     pub fn send_remote_packets(
         &self,
-        exchange: &dyn crate::core::distributed::exchange::RemotePacketExchange,
-    ) -> anyhow::Result<usize> {
-        let mut outbound = self.outbound_remote_packets.lock().unwrap();
-        // Sort deterministically
-        outbound.sort_by(|a, b| {
-            a.deliver_time
-                .cmp(&b.deliver_time)
-                .then_with(|| a.src_host_id.cmp(&b.src_host_id))
-                .then_with(|| a.src_host_event_id.cmp(&b.src_host_event_id))
-                .then_with(|| a.dst_host_id.cmp(&b.dst_host_id))
-        });
-        let count = outbound.len();
-        let events: Vec<RemotePacketEvent> = std::mem::take(&mut *outbound);
-        // Always call send to participate in MPI collectives
-        exchange.send(self.shard_id, &events)?;
-        Ok(count)
+        exchange: &dyn RemotePacketExchange,
+    ) -> Result<(), RemotePacketExchangeError> {
+        let packets = self.outbound_remote_packets.drain_sorted();
+        let count = packets.len();
+        let payload_bytes = packets
+            .iter()
+            .map(|packet| packet.event.packet_payload_len())
+            .sum();
+        let mut cut_stats: BTreeMap<ShardId, (usize, usize)> = BTreeMap::new();
+        for packet in &packets {
+            let entry = cut_stats.entry(packet.dst_shard).or_default();
+            entry.0 += 1;
+            entry.1 += packet.event.packet_payload_len();
+        }
+
+        exchange.send(packets)?;
+        SIM_STATS.record_remote_packets_sent(count, payload_bytes);
+        for (dst_shard, (count, payload_bytes)) in cut_stats {
+            SIM_STATS.record_remote_packet_cut_sent(
+                self.current_shard.0,
+                dst_shard.0,
+                count,
+                payload_bytes,
+            );
+        }
+        Ok(())
     }
 
-    /// Receive inbound remote packets and push them into destination host queues.
-    /// Returns the minimum received delivery time (if any).
     pub fn receive_remote_packets(
         &self,
-        exchange: &dyn crate::core::distributed::exchange::RemotePacketExchange,
-    ) -> anyhow::Result<Option<EmulatedTime>> {
-        let (events, min_time) = exchange.receive(self.shard_id)?;
-        for event in &events {
-            match event
-                .clone()
-                .into_local_event(self.shard_id, &self.partition_map)
-            {
-                Ok(delivery) => {
-                    let event_queue =
-                        self.event_queues
-                            .get(&delivery.dst_host_id)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "No event queue for host {:?}",
-                                    delivery.dst_host_id
-                                )
-                            })?;
-
-                    // Reconstruct a PacketRc from the serialized packet data
-                    match deserialize_packet_from_remote(&delivery.packet) {
-                        Ok(packetrc) => {
-                            let event = crate::core::work::event::Event::new_packet_with_meta(
-                                packetrc,
-                                delivery.deliver_time,
-                                delivery.src_host_id,
-                                delivery.src_host_event_id,
-                            );
-                            event_queue.lock().unwrap().push(event);
-                            log::trace!(
-                                "Delivered remote packet: src={:?} dst={:?} src_ev={} time={:?}",
-                                delivery.src_host_id,
-                                delivery.dst_host_id,
-                                delivery.src_host_event_id,
-                                delivery.deliver_time
-                            );
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to reconstruct remote packet from {:?} to {:?}: {e}",
-                                delivery.src_host_id,
-                                delivery.dst_host_id
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("Failed to deliver remote packet: {e}");
-                }
-            }
+        exchange: &dyn RemotePacketExchange,
+    ) -> Result<Option<EmulatedTime>, RemotePacketExchangeError> {
+        let packets = exchange.receive(self.current_shard)?;
+        let next_event_time = packets.iter().map(|x| x.deliver_time).min();
+        let count = packets.len();
+        let payload_bytes = packets
+            .iter()
+            .map(RemotePacketEvent::packet_payload_len)
+            .sum();
+        let mut cut_stats: BTreeMap<ShardId, (usize, usize)> = BTreeMap::new();
+        for packet in &packets {
+            let src_shard = self
+                .partition_map
+                .shard_for_host(packet.src_host_id)
+                .ok_or_else(|| {
+                    RemotePacketExchangeError::Backend(format!(
+                        "received remote packet from unknown source host {:?}",
+                        packet.src_host_id
+                    ))
+                })?;
+            let entry = cut_stats.entry(src_shard).or_default();
+            entry.0 += 1;
+            entry.1 += packet.packet_payload_len();
         }
-        Ok(min_time)
-    }
-}
-
-/// Serialize a packet for remote delivery. Returns an error for legacy C TCP packets.
-fn serialize_packet_for_remote(packetrc: &PacketRc) -> Result<SerializedPacket, String> {
-    use crate::network::packet::Packet;
-
-    let src = packetrc.src_ipv4_address();
-    let dst = packetrc.dst_ipv4_address();
-    let priority = packetrc.priority();
-
-    match packetrc.iana_protocol() {
-        crate::network::packet::IanaProtocol::Udp => {
-            let payload = packetrc.payload();
-            let flat: Vec<u8> = payload.iter().flat_map(|b| b.as_ref().to_vec()).collect();
-            Ok(SerializedPacket::Udp {
-                src_ip: *src.ip(),
-                dst_ip: *dst.ip(),
-                src_port: src.port(),
-                dst_port: dst.port(),
-                priority,
-                payload: flat,
-            })
+        for packet in packets {
+            self.push_inbound_remote_packet(packet)?;
         }
-        crate::network::packet::IanaProtocol::Tcp => {
-            match packetrc.ipv4_tcp_header() {
-                Some(tcp_hdr) => {
-                    let payload = packetrc.payload();
-                    let flat: Vec<u8> = payload.iter().flat_map(|b| b.as_ref().to_vec()).collect();
-                    let selective_acks: Vec<(u32, u32)> = tcp_hdr
-                        .selective_acks
-                        .map(|sacks| sacks.iter().map(|s| (s.0, s.1)).collect())
-                        .unwrap_or_default();
-                    Ok(SerializedPacket::Tcp {
-                        src_ip: tcp_hdr.ip.src,
-                        dst_ip: tcp_hdr.ip.dst,
-                        src_port: tcp_hdr.src_port,
-                        dst_port: tcp_hdr.dst_port,
-                        flags: tcp_hdr.flags.bits(),
-                        seq: tcp_hdr.seq,
-                        ack: tcp_hdr.ack,
-                        window_size: tcp_hdr.window_size,
-                        window_scale: tcp_hdr.window_scale,
-                        selective_acks,
-                        timestamp: tcp_hdr.timestamp,
-                        timestamp_echo: tcp_hdr.timestamp_echo,
-                        priority,
-                        payload: flat,
-                    })
-                }
-                None => {
-                    // Legacy C TCP
-                    Err("Legacy C TCP is not supported for distributed mode. \
-                         Set experimental.use_new_tcp=true."
-                        .to_string())
-                }
-            }
+        SIM_STATS.record_remote_packets_received(count, payload_bytes);
+        for (src_shard, (count, payload_bytes)) in cut_stats {
+            SIM_STATS.record_remote_packet_cut_received(
+                src_shard.0,
+                self.current_shard.0,
+                count,
+                payload_bytes,
+            );
         }
-        _ => Err(format!(
-            "Unsupported protocol for remote delivery: {:?}",
-            packetrc.iana_protocol()
-        )),
-    }
-}
-
-/// Reconstruct a `PacketRc` from a `SerializedPacket` that was received from a remote shard.
-fn deserialize_packet_from_remote(serialized: &SerializedPacket) -> Result<PacketRc, String> {
-    use crate::host::network::interface::FifoPacketPriority;
-    use bytes::Bytes;
-    use std::net::SocketAddrV4;
-
-    match serialized {
-        SerializedPacket::Udp {
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            priority,
-            payload,
-        } => {
-            let src = SocketAddrV4::new(*src_ip, *src_port);
-            let dst = SocketAddrV4::new(*dst_ip, *dst_port);
-            Ok(PacketRc::new_ipv4_udp(
-                src,
-                dst,
-                Bytes::from(payload.clone()),
-                *priority,
-            ))
-        }
-        SerializedPacket::Tcp {
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            flags,
-            seq,
-            ack,
-            window_size,
-            window_scale,
-            selective_acks,
-            timestamp,
-            timestamp_echo,
-            priority,
-            payload,
-        } => {
-            use crate::network::packet::Packet;
-            let ip_header = tcp::Ipv4Header {
-                src: *src_ip,
-                dst: *dst_ip,
-            };
-            let tcp_flags = tcp::TcpFlags::from_bits_retain(*flags);
-
-            // Reconstruct SACK blocks via SmallArrayBackedSlice
-            let sacks: Option<tcp::util::SmallArrayBackedSlice<4, (u32, u32)>> =
-                if selective_acks.is_empty() {
-                    None
-                } else {
-                    tcp::util::SmallArrayBackedSlice::new(selective_acks)
-                        .ok_or_else(|| {
-                            format!(
-                                "Too many SACK blocks for reconstruction: {}",
-                                selective_acks.len()
-                            )
-                        })?
-                        .into()
-                };
-
-            let tcp_header = tcp::TcpHeader {
-                ip: ip_header,
-                flags: tcp_flags,
-                src_port: *src_port,
-                dst_port: *dst_port,
-                seq: *seq,
-                ack: *ack,
-                window_size: *window_size,
-                selective_acks: sacks,
-                window_scale: *window_scale,
-                timestamp: *timestamp,
-                timestamp_echo: *timestamp_echo,
-            };
-            let tcp_payload = tcp::Payload(vec![Bytes::from(payload.clone())]);
-            Ok(PacketRc::new_ipv4_tcp(tcp_header, tcp_payload, *priority))
-        }
+        Ok(next_event_time)
     }
 }
 

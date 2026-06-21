@@ -7,7 +7,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -15,9 +15,8 @@ use anyhow::Context;
 use once_cell::sync::Lazy;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use shadow_shim_helper_rs::simulation_time::SimulationTime;
-
 use shadow_shim_helper_rs::HostId;
+use shadow_shim_helper_rs::simulation_time::SimulationTime;
 
 use crate::core::configuration::{
     ConfigOptions, EnvName, Flatten, HostOptions, LogLevel, ProcessArgs, ProcessFinalState,
@@ -42,17 +41,14 @@ pub struct SimConfig {
     // bandwidths of hosts at ip addresses
     pub host_bandwidths: HashMap<std::net::IpAddr, Bandwidth>,
 
-    // a list of hosts and their processes
-    pub hosts: Vec<HostInfo>,
-
-    // global host ids assigned in sorted hostname order (deterministic)
-    pub host_ids: HashMap<String, HostId>,
-
-    // partition map for distributed mode
+    // map from global host id to owning shard
     pub partition_map: PartitionMap,
 
-    // current shard id
-    pub shard_id: ShardId,
+    // DNS records for all configured hosts, including hosts that may be remote in future shards
+    pub dns_hosts: Vec<HostDnsInfo>,
+
+    // a list of hosts and their processes
+    pub hosts: Vec<HostInfo>,
 }
 
 impl SimConfig {
@@ -67,8 +63,10 @@ impl SimConfig {
 
         // build the host list
         let mut hosts = vec![];
-        for (name, host_options) in &config.hosts {
+        for (i, (name, host_options)) in config.hosts.iter().enumerate() {
+            let host_id = HostId::from(u32::try_from(i).unwrap());
             let new_host = build_host(
+                host_id,
                 config,
                 host_options,
                 name,
@@ -166,97 +164,316 @@ impl SimConfig {
             })
             .collect();
 
-        // Assign deterministic global host ids based on sorted hostname order.
-        // This must happen before any shard filtering so that host ids are stable
-        // regardless of partition count or layout.
-        let host_ids: HashMap<String, HostId> = hosts
-            .iter()
-            .enumerate()
-            .map(|(i, info)| (info.name.clone(), HostId::from(u32::try_from(i).unwrap())))
-            .collect();
-
-        // Set the host id on each HostInfo
-        for info in &mut hosts {
-            info.id = Some(host_ids[&info.name]);
+        let distributed_shard_id = config.experimental.distributed_shard_id.unwrap();
+        let distributed_shard_count = config.experimental.distributed_shard_count.unwrap();
+        if distributed_shard_id >= distributed_shard_count {
+            return Err(anyhow::anyhow!(
+                "distributed_shard_id ({distributed_shard_id}) must be less than distributed_shard_count ({distributed_shard_count})"
+            ));
         }
-
-        // Build the partition map
-        let shard_count = config.experimental.distributed_shard_count.unwrap();
-        let shard_id = ShardId(config.experimental.distributed_shard_id.unwrap());
-        let host_id_list: Vec<HostId> = hosts.iter().map(|info| host_ids[&info.name]).collect();
-
-        let partition_map = if let Some(ref partition_file) =
-            config.experimental.distributed_partition_file
-        {
-            // Load explicit partition from YAML file
-            let contents = std::fs::read_to_string(partition_file)
-                .with_context(|| format!("Failed to read partition file '{partition_file}'"))?;
-            let hostname_to_shard: HashMap<String, u32> = serde_yaml::from_str(&contents)
-                .with_context(|| format!("Failed to parse partition file '{partition_file}'"))?;
-            let mapping: HashMap<HostId, ShardId> = hostname_to_shard
-                .iter()
-                .map(|(hostname, &s)| {
-                    let id = *host_ids.get(hostname).ok_or_else(|| {
-                        anyhow::anyhow!("Partition file references unknown host '{hostname}'")
-                    })?;
-                    if s >= shard_count {
-                        return Err(anyhow::anyhow!(
-                            "Partition file shard id {s} for host '{hostname}' exceeds shard count {shard_count}"
-                        ));
-                    }
-                    Ok((id, ShardId(s)))
-                })
-                .collect::<anyhow::Result<_>>()?;
-            // Check all hosts are covered
-            for info in &hosts {
-                if !mapping.contains_key(&host_ids[&info.name]) {
-                    return Err(anyhow::anyhow!(
-                        "Partition file missing host '{}'",
-                        info.name
-                    ));
-                }
+        let partition_map =
+            if let Some(path) = config.experimental.distributed_partition_file.as_ref() {
+                load_partition_map(path, &hosts, distributed_shard_count)
+            } else {
+                PartitionMap::by_host_id_modulo(
+                    hosts.iter().map(|host| host.id),
+                    distributed_shard_count,
+                )
+                .map_err(anyhow::Error::from)
             }
-            PartitionMap::from_host_shards(mapping, shard_count)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-        } else {
-            // Default: modulo assignment
-            PartitionMap::by_host_id_modulo(&host_id_list, shard_count)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-        };
-
-        if shard_id.0 >= shard_count {
+            .context("Invalid distributed shard configuration")?;
+        if !hosts.iter().any(|host| {
+            partition_map
+                .is_host_local(ShardId(distributed_shard_id), host.id)
+                .unwrap()
+        }) {
             return Err(anyhow::anyhow!(
-                "Shard id {} exceeds shard count {}",
-                shard_id.0,
-                shard_count
+                "distributed shard {distributed_shard_id} has no assigned hosts"
             ));
         }
-
-        // Multi-shard distributed mode requires Rust TCP (legacy C TCP is not serializable).
-        if shard_count > 1 && !config.experimental.use_new_tcp.unwrap_or(false) {
+        if distributed_shard_count > 1 && !config.experimental.use_new_tcp.unwrap() {
             return Err(anyhow::anyhow!(
-                "Distributed multi-shard mode (shard_count={shard_count}) requires \
-                 experimental.use_new_tcp=true. \
-                 Legacy C TCP packets cannot be serialized for cross-shard delivery. \
-                 Add 'experimental: {{ use_new_tcp: true }}' to your configuration."
+                "distributed mode requires experimental.use_new_tcp=true; \
+                 legacy C TCP packets cannot be serialized across shards"
             ));
         }
+        let dns_hosts = hosts
+            .iter()
+            .map(|host| HostDnsInfo {
+                id: host.id,
+                name: host.name.clone(),
+                ip_addr: host.ip_addr.unwrap(),
+            })
+            .collect();
 
         Ok(Self {
             random,
             ip_assignment,
             routing_info,
             host_bandwidths,
-            hosts,
-            host_ids,
             partition_map,
-            shard_id,
+            dns_hosts,
+            hosts,
         })
     }
 }
 
+fn load_partition_map(
+    path: &Path,
+    hosts: &[HostInfo],
+    shard_count: u32,
+) -> anyhow::Result<PartitionMap> {
+    let file = std::fs::File::open(path).with_context(|| {
+        format!(
+            "Failed to open distributed partition file '{}'",
+            path.display()
+        )
+    })?;
+    let assignments: BTreeMap<String, u32> = serde_yaml::from_reader(file).with_context(|| {
+        format!(
+            "Failed to parse distributed partition file '{}'",
+            path.display()
+        )
+    })?;
+
+    let hosts_by_name: HashMap<&str, HostId> = hosts
+        .iter()
+        .map(|host| (host.name.as_str(), host.id))
+        .collect();
+    let mut host_shards = Vec::with_capacity(hosts.len());
+    let mut assigned_hosts = HashSet::new();
+
+    for (hostname, shard_id) in assignments {
+        let host_id = *hosts_by_name.get(hostname.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("distributed partition file assigns unknown host '{hostname}'")
+        })?;
+        if shard_id >= shard_count {
+            return Err(anyhow::anyhow!(
+                "distributed partition file assigns host '{hostname}' to shard {shard_id}, but shard count is {shard_count}"
+            ));
+        }
+        assigned_hosts.insert(hostname);
+        host_shards.push((host_id, ShardId(shard_id)));
+    }
+
+    for host in hosts {
+        if !assigned_hosts.contains(&host.name) {
+            return Err(anyhow::anyhow!(
+                "distributed partition file does not assign host '{}'",
+                host.name
+            ));
+        }
+    }
+
+    Ok(PartitionMap::from_host_shards(host_shards))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::configuration::{CliOptions, ConfigFileOptions};
+    use clap::Parser;
+
+    fn test_config(extra_experimental: &str) -> ConfigOptions {
+        let yaml = format!(
+            r#"
+            general:
+              stop_time: 1 s
+            network:
+              graph:
+                type: 1_gbit_switch
+            experimental:
+              {extra_experimental}
+            hosts:
+              hosta:
+                network_node_id: 0
+                processes:
+                - path: /bin/true
+              hostb:
+                network_node_id: 0
+                processes:
+                - path: /bin/true
+        "#
+        );
+        let config_file: ConfigFileOptions = serde_yaml::from_str(&yaml).unwrap();
+        let cli = CliOptions::try_parse_from(["shadow", "-"]).unwrap();
+        ConfigOptions::new(config_file, cli)
+    }
+
+    #[test]
+    fn distributed_shard_config_builds_modulo_partition() {
+        let config = test_config(
+            r#"
+              distributed_shard_id: 1
+              distributed_shard_count: 2
+              use_new_tcp: true
+        "#,
+        );
+
+        let sim_config = SimConfig::new(&config, &HashSet::new()).unwrap();
+
+        assert_eq!(
+            sim_config.partition_map.shard_for_host(HostId::from(0)),
+            Some(ShardId(0))
+        );
+        assert_eq!(
+            sim_config.partition_map.shard_for_host(HostId::from(1)),
+            Some(ShardId(1))
+        );
+    }
+
+    #[test]
+    fn distributed_shard_config_loads_partition_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition_path = dir.path().join("partition.yaml");
+        std::fs::write(&partition_path, "hosta: 1\nhostb: 0\n").unwrap();
+        let mut config = test_config(
+            r#"
+              distributed_shard_id: 1
+              distributed_shard_count: 2
+              use_new_tcp: true
+        "#,
+        );
+        config.experimental.distributed_partition_file = Some(partition_path);
+
+        let sim_config = SimConfig::new(&config, &HashSet::new()).unwrap();
+
+        assert_eq!(
+            sim_config.partition_map.shard_for_host(HostId::from(0)),
+            Some(ShardId(1))
+        );
+        assert_eq!(
+            sim_config.partition_map.shard_for_host(HostId::from(1)),
+            Some(ShardId(0))
+        );
+    }
+
+    #[test]
+    fn distributed_shard_config_rejects_partition_file_missing_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition_path = dir.path().join("partition.yaml");
+        std::fs::write(&partition_path, "hosta: 0\n").unwrap();
+        let mut config = test_config(
+            r#"
+              distributed_shard_id: 0
+              distributed_shard_count: 2
+              use_new_tcp: true
+        "#,
+        );
+        config.experimental.distributed_partition_file = Some(partition_path);
+
+        let err = SimConfig::new(&config, &HashSet::new()).err().unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("Invalid distributed shard configuration")
+        );
+        assert!(
+            err.root_cause()
+                .to_string()
+                .contains("does not assign host 'hostb'")
+        );
+    }
+
+    #[test]
+    fn distributed_shard_config_rejects_partition_file_unknown_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition_path = dir.path().join("partition.yaml");
+        std::fs::write(&partition_path, "hosta: 0\nhostb: 1\nhostc: 0\n").unwrap();
+        let mut config = test_config(
+            r#"
+              distributed_shard_id: 0
+              distributed_shard_count: 2
+              use_new_tcp: true
+        "#,
+        );
+        config.experimental.distributed_partition_file = Some(partition_path);
+
+        let err = SimConfig::new(&config, &HashSet::new()).err().unwrap();
+
+        assert!(
+            err.root_cause()
+                .to_string()
+                .contains("assigns unknown host 'hostc'")
+        );
+    }
+
+    #[test]
+    fn distributed_shard_config_rejects_partition_file_shard_past_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition_path = dir.path().join("partition.yaml");
+        std::fs::write(&partition_path, "hosta: 0\nhostb: 2\n").unwrap();
+        let mut config = test_config(
+            r#"
+              distributed_shard_id: 0
+              distributed_shard_count: 2
+              use_new_tcp: true
+        "#,
+        );
+        config.experimental.distributed_partition_file = Some(partition_path);
+
+        let err = SimConfig::new(&config, &HashSet::new()).err().unwrap();
+
+        assert!(
+            err.root_cause()
+                .to_string()
+                .contains("shard 2, but shard count is 2")
+        );
+    }
+
+    #[test]
+    fn distributed_shard_config_rejects_shard_id_past_count() {
+        let config = test_config(
+            r#"
+              distributed_shard_id: 2
+              distributed_shard_count: 2
+        "#,
+        );
+
+        let err = SimConfig::new(&config, &HashSet::new()).err().unwrap();
+
+        assert!(err.to_string().contains("must be less than"));
+    }
+
+    #[test]
+    fn distributed_shard_config_rejects_empty_selected_shard() {
+        let config = test_config(
+            r#"
+              distributed_shard_id: 2
+              distributed_shard_count: 3
+        "#,
+        );
+
+        let err = SimConfig::new(&config, &HashSet::new()).err().unwrap();
+
+        assert!(err.to_string().contains("has no assigned hosts"));
+    }
+
+    #[test]
+    fn distributed_shard_config_requires_new_tcp() {
+        let config = test_config(
+            r#"
+              distributed_shard_id: 0
+              distributed_shard_count: 2
+        "#,
+        );
+
+        let err = SimConfig::new(&config, &HashSet::new()).err().unwrap();
+
+        assert!(err.to_string().contains("experimental.use_new_tcp=true"));
+    }
+}
+
+#[derive(Clone)]
+pub struct HostDnsInfo {
+    pub id: HostId,
+    pub name: String,
+    pub ip_addr: std::net::IpAddr,
+}
+
 #[derive(Clone)]
 pub struct HostInfo {
+    pub id: HostId,
     pub name: String,
     pub processes: Vec<ProcessInfo>,
     pub seed: u64,
@@ -274,8 +491,6 @@ pub struct HostInfo {
     pub autotune_send_buf: bool,
     pub autotune_recv_buf: bool,
     pub qdisc: QDiscMode,
-    /// Global host id, assigned deterministically from sorted hostname order.
-    pub id: Option<HostId>,
 }
 
 #[derive(Clone)]
@@ -302,6 +517,7 @@ pub struct PcapConfig {
 
 /// For a host entry in the configuration options, build `HostInfo` object.
 fn build_host(
+    id: HostId,
     config: &ConfigOptions,
     host: &HostOptions,
     hostname: &str,
@@ -329,6 +545,7 @@ fn build_host(
         .collect::<anyhow::Result<_>>()?;
 
     Ok(HostInfo {
+        id,
         name: hostname,
         processes,
 
@@ -361,8 +578,6 @@ fn build_host(
                     .unwrap()
                     .value(),
             }),
-
-        id: None,
 
         // some options come from the config options and not the host options
         send_buf_size: config

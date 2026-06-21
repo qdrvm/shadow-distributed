@@ -21,8 +21,7 @@ impl Event {
         Self::new_packet_with_meta(packet, time, src_host.id(), src_host.get_new_event_id())
     }
 
-    /// A new packet event with explicit source metadata, used by receiving shards
-    /// to preserve source ordering from the sending shard.
+    /// A new packet event using source metadata that was assigned by the sending host.
     pub fn new_packet_with_meta(
         packet: PacketRc,
         time: EmulatedTime,
@@ -63,6 +62,14 @@ impl Event {
     pub fn set_time(&mut self, time: EmulatedTime) {
         self.magic.debug_check();
         self.time = time;
+    }
+
+    pub fn packet_source_metadata(&self) -> Option<(HostId, u64)> {
+        self.magic.debug_check();
+        match &self.data {
+            EventData::Packet(data) => Some((data.src_host_id, data.src_host_event_id)),
+            EventData::Local(_) => None,
+        }
     }
 
     /// The event data.
@@ -162,6 +169,27 @@ impl PartialOrd for PacketEventData {
         }
 
         Some(cmp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_events_order_by_source_host_then_event_id() {
+        let time = EmulatedTime::SIMULATION_START;
+
+        let event_a =
+            Event::new_packet_with_meta(PacketRc::new_ipv4_udp_mock(), time, HostId::from(1), 10);
+        let event_b =
+            Event::new_packet_with_meta(PacketRc::new_ipv4_udp_mock(), time, HostId::from(2), 0);
+        let event_c =
+            Event::new_packet_with_meta(PacketRc::new_ipv4_udp_mock(), time, HostId::from(1), 11);
+
+        assert!(event_a < event_b);
+        assert!(event_a < event_c);
+        assert!(event_c < event_b);
     }
 }
 

@@ -1,0 +1,19 @@
+general:
+  stop_time: 20
+network:
+  graph:
+    type: 1_gbit_switch
+hosts:
+  fail-shard:
+    network_node_id: 0
+    processes:
+    - path: /bin/false
+      start_time: 1
+      expected_final_state: {exited: 0}
+  peer-shard:
+    network_node_id: 0
+    processes:
+    - path: /bin/sleep
+      args: "1000"
+      start_time: 1
+      expected_final_state: running

@@ -26,3 +26,24 @@ foreach(BlockingMode blocking nonblocking-poll nonblocking-select nonblocking-ep
         endif()
     endforeach()
 endforeach()
+
+add_shadow_tests(BASENAME tcp-distributed ARGS --distributed-shard-count 2 --use-new-tcp true)
+add_shadow_tests(
+    BASENAME tcp-distributed-determinism-a
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/tcp-distributed.yaml
+    ARGS --distributed-shard-count 2 --use-new-tcp true
+)
+add_shadow_tests(
+    BASENAME tcp-distributed-determinism-b
+    SHADOW_CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/tcp-distributed.yaml
+    ARGS --distributed-shard-count 2 --use-new-tcp true
+)
+add_test(
+    NAME tcp-distributed-determinism-compare-shadow
+    COMMAND ${CMAKE_COMMAND}
+        -D RUN_A=${CMAKE_CURRENT_BINARY_DIR}/tcp-distributed-determinism-a-shadow.data
+        -D RUN_B=${CMAKE_CURRENT_BINARY_DIR}/tcp-distributed-determinism-b-shadow.data
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tcp_distributed_determinism_compare.cmake
+)
+set_tests_properties(tcp-distributed-determinism-compare-shadow
+    PROPERTIES DEPENDS "tcp-distributed-determinism-a-shadow;tcp-distributed-determinism-b-shadow")

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use anyhow::Context;
@@ -36,6 +37,7 @@ pub struct SharedSimStats {
     pub alloc_counts: Mutex<Counter>,
     pub dealloc_counts: Mutex<Counter>,
     pub syscall_counts: Mutex<Counter>,
+    pub distributed: Mutex<DistributedSimStats>,
 }
 
 impl SharedSimStats {
@@ -44,6 +46,7 @@ impl SharedSimStats {
             alloc_counts: Mutex::new(Counter::new()),
             dealloc_counts: Mutex::new(Counter::new()),
             syscall_counts: Mutex::new(Counter::new()),
+            distributed: Mutex::new(DistributedSimStats::default()),
         }
     }
 
@@ -65,6 +68,51 @@ impl SharedSimStats {
         *local_dealloc_counts = Counter::new();
         *local_syscall_counts = Counter::new();
     }
+
+    pub fn record_remote_packets_sent(&self, count: usize, payload_bytes: usize) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.remote_packets_sent += u64::try_from(count).unwrap();
+        distributed.remote_packet_payload_bytes_sent += u64::try_from(payload_bytes).unwrap();
+    }
+
+    pub fn record_remote_packet_cut_sent(
+        &self,
+        src_shard: u32,
+        dst_shard: u32,
+        count: usize,
+        payload_bytes: usize,
+    ) {
+        let mut distributed = self.distributed.lock().unwrap();
+        let cut = distributed.cut_mut(src_shard, dst_shard);
+        cut.packets_sent += u64::try_from(count).unwrap();
+        cut.payload_bytes_sent += u64::try_from(payload_bytes).unwrap();
+    }
+
+    pub fn record_remote_packets_received(&self, count: usize, payload_bytes: usize) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.remote_packets_received += u64::try_from(count).unwrap();
+        distributed.remote_packet_payload_bytes_received += u64::try_from(payload_bytes).unwrap();
+    }
+
+    pub fn record_remote_packet_cut_received(
+        &self,
+        src_shard: u32,
+        dst_shard: u32,
+        count: usize,
+        payload_bytes: usize,
+    ) {
+        let mut distributed = self.distributed.lock().unwrap();
+        let cut = distributed.cut_mut(src_shard, dst_shard);
+        cut.packets_received += u64::try_from(count).unwrap();
+        cut.payload_bytes_received += u64::try_from(payload_bytes).unwrap();
+    }
+
+    pub fn record_distributed_barrier_wait(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.control_barrier_wait_count += 1;
+        distributed.control_barrier_wait_time_ns +=
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    }
 }
 
 impl Default for SharedSimStats {
@@ -78,12 +126,46 @@ impl Default for SharedSimStats {
 struct SimStatsForOutput {
     pub objects: ObjectStatsForOutput,
     pub syscalls: Counter,
+    pub distributed: DistributedSimStats,
 }
 
 #[derive(Serialize, Clone, Debug)]
 struct ObjectStatsForOutput {
     pub alloc_counts: Counter,
     pub dealloc_counts: Counter,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct DistributedSimStats {
+    pub remote_packets_sent: u64,
+    pub remote_packet_payload_bytes_sent: u64,
+    pub remote_packets_received: u64,
+    pub remote_packet_payload_bytes_received: u64,
+    pub remote_packet_cut_matrix: BTreeMap<String, DistributedShardCutStats>,
+    pub control_barrier_wait_count: u64,
+    pub control_barrier_wait_time_ns: u64,
+}
+
+impl DistributedSimStats {
+    fn cut_mut(&mut self, src_shard: u32, dst_shard: u32) -> &mut DistributedShardCutStats {
+        self.remote_packet_cut_matrix
+            .entry(format!("{src_shard}->{dst_shard}"))
+            .or_insert_with(|| DistributedShardCutStats {
+                src_shard,
+                dst_shard,
+                ..Default::default()
+            })
+    }
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct DistributedShardCutStats {
+    pub src_shard: u32,
+    pub dst_shard: u32,
+    pub packets_sent: u64,
+    pub payload_bytes_sent: u64,
+    pub packets_received: u64,
+    pub payload_bytes_received: u64,
 }
 
 impl SimStatsForOutput {
@@ -96,6 +178,7 @@ impl SimStatsForOutput {
                 dealloc_counts: std::mem::take(&mut stats.dealloc_counts.lock().unwrap()),
             },
             syscalls: std::mem::take(&mut stats.syscall_counts.lock().unwrap()),
+            distributed: std::mem::take(&mut stats.distributed.lock().unwrap()),
         }
     }
 }
@@ -118,4 +201,35 @@ pub fn write_stats_to_file(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_distributed_stats() {
+        let stats = SharedSimStats::new();
+
+        stats.record_remote_packets_sent(2, 100);
+        stats.record_remote_packet_cut_sent(0, 1, 2, 100);
+        stats.record_remote_packets_received(3, 200);
+        stats.record_remote_packet_cut_received(0, 1, 3, 200);
+        stats.record_distributed_barrier_wait(std::time::Duration::from_nanos(50));
+
+        let distributed = stats.distributed.lock().unwrap().clone();
+        assert_eq!(distributed.remote_packets_sent, 2);
+        assert_eq!(distributed.remote_packet_payload_bytes_sent, 100);
+        assert_eq!(distributed.remote_packets_received, 3);
+        assert_eq!(distributed.remote_packet_payload_bytes_received, 200);
+        let cut = distributed.remote_packet_cut_matrix.get("0->1").unwrap();
+        assert_eq!(cut.src_shard, 0);
+        assert_eq!(cut.dst_shard, 1);
+        assert_eq!(cut.packets_sent, 2);
+        assert_eq!(cut.payload_bytes_sent, 100);
+        assert_eq!(cut.packets_received, 3);
+        assert_eq!(cut.payload_bytes_received, 200);
+        assert_eq!(distributed.control_barrier_wait_count, 1);
+        assert_eq!(distributed.control_barrier_wait_time_ns, 50);
+    }
 }

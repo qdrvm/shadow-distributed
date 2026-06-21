@@ -1,0 +1,17 @@
+function(require_contains FILE NEEDLE)
+    file(READ ${FILE} CONTENTS)
+    string(FIND "${CONTENTS}" "${NEEDLE}" MATCH_INDEX)
+
+    if(MATCH_INDEX EQUAL -1)
+        message(FATAL_ERROR "Expected '${FILE}' to contain '${NEEDLE}'")
+    endif()
+endfunction()
+
+require_contains(${RUN_DIR}.shard-0/sim-stats.json "\"0->1\"")
+require_contains(${RUN_DIR}.shard-0/sim-stats.json "\"2->0\"")
+require_contains(${RUN_DIR}.shard-1/sim-stats.json "\"0->1\"")
+require_contains(${RUN_DIR}.shard-1/sim-stats.json "\"1->3\"")
+require_contains(${RUN_DIR}.shard-2/sim-stats.json "\"2->0\"")
+require_contains(${RUN_DIR}.shard-2/sim-stats.json "\"3->2\"")
+require_contains(${RUN_DIR}.shard-3/sim-stats.json "\"1->3\"")
+require_contains(${RUN_DIR}.shard-3/sim-stats.json "\"3->2\"")
