@@ -64,6 +64,10 @@ pub trait RemotePacketExchange: Send + Sync {
     fn send(&self, packets: Vec<OutboundRemotePacket>) -> Result<(), RemotePacketExchangeError>;
 
     fn receive(&self, shard: ShardId) -> Result<Vec<RemotePacketEvent>, RemotePacketExchangeError>;
+
+    fn requires_send_complete_synchronization(&self) -> bool {
+        true
+    }
 }
 
 pub trait DistributedSynchronizer: Send + Sync {
@@ -346,6 +350,9 @@ pub(crate) mod mpi_backend {
             let encoded: Vec<Vec<u8>> = groups
                 .iter_mut()
                 .map(|group| {
+                    if group.is_empty() {
+                        return Ok(Vec::new());
+                    }
                     group.sort_by(remote_packet_event_cmp);
                     encode_remote_packet_batch(group)
                 })
@@ -396,7 +403,10 @@ pub(crate) mod mpi_backend {
             for batch in &encoded {
                 send_buf.extend_from_slice(batch);
             }
-            let mut recv_buf = vec![0; recv_total];
+            if send_buf.is_empty() {
+                send_buf.push(0);
+            }
+            let mut recv_buf = vec![0; recv_total.max(1)];
 
             let alltoallv_start = std::time::Instant::now();
             unsafe {
@@ -452,6 +462,10 @@ pub(crate) mod mpi_backend {
                 )));
             }
             Ok(std::mem::take(&mut *self.pending_received.lock().unwrap()))
+        }
+
+        fn requires_send_complete_synchronization(&self) -> bool {
+            false
         }
     }
 
@@ -722,6 +736,10 @@ impl<T: RemotePacketExchange + ?Sized> RemotePacketExchange for Arc<T> {
 
     fn receive(&self, shard: ShardId) -> Result<Vec<RemotePacketEvent>, RemotePacketExchangeError> {
         self.as_ref().receive(shard)
+    }
+
+    fn requires_send_complete_synchronization(&self) -> bool {
+        self.as_ref().requires_send_complete_synchronization()
     }
 }
 

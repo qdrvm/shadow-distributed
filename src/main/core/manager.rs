@@ -529,7 +529,9 @@ impl<'a> Manager<'a> {
                     let worker_shared = worker::WORKER_SHARED.borrow();
                     let worker_shared = worker_shared.as_ref().unwrap();
                     worker_shared.send_remote_packets(remote_packet_exchange)?;
-                    self.controller.remote_packet_send_complete()?;
+                    if remote_packet_exchange.requires_send_complete_synchronization() {
+                        self.controller.remote_packet_send_complete()?;
+                    }
                     worker_shared.receive_remote_packets(remote_packet_exchange)?
                 };
 

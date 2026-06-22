@@ -55,6 +55,15 @@ was removed during the merge to avoid duplicate Rust module definitions.
 - The existing UDP distributed large-partition stats check verifies that the new
   timing fields are emitted in shard `sim-stats.json` output.
 
+### MPI packet-exchange optimization
+- `RemotePacketExchange` backends now report whether they require an external
+  post-send synchronization step.
+- The MPI backend skips the extra post-send `MPI_Barrier`, since its packet
+  exchange already synchronizes all ranks through `MPI_Alltoall` and
+  `MPI_Alltoallv`.
+- MPI packet exchange no longer serializes empty remote-packet batches; zero-byte
+  `MPI_Alltoallv` calls use dummy one-byte buffers for OpenMPI compatibility.
+
 ## Verified
 
 ```text
@@ -77,6 +86,10 @@ Results:
   explicit partitioning, and UDP determinism.
 - Performance instrumentation unit tests and distributed stats output checks pass.
 - MPI shard stats include nonzero MPI timing totals after `ctest -L mpi`.
+- The 4-node `ethlambda` 120s distributed run completes after the packet-exchange
+  optimization; MPI barrier calls drop from 7,876 total to 4 total.
+- The 64-node `ethlambda` 120s distributed run completes in 894s wall-clock after
+  the optimization, compared with the prior 967s baseline.
 
 ## Notes
 
@@ -86,5 +99,7 @@ Results:
   `distributed_partition_file`; packet routing now flows through `OutboundRemotePacket.dst_shard`.
 - Worker hosts still need the merged source rebuilt/synced before rerunning the 4-host
   `ethlambda` simulation.
+- After the packet-exchange optimization, the next visible MPI bottleneck is
+  `MPI_Alltoall` size exchange.
 - The current MPI backend binds OpenMPI exported symbols directly. MPICH portability
   requires replacing the direct OpenMPI FFI with a portable C shim or generated bindings.
