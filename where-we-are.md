@@ -63,6 +63,21 @@ was removed during the merge to avoid duplicate Rust module definitions.
   `MPI_Alltoallv`.
 - MPI packet exchange no longer serializes empty remote-packet batches; zero-byte
   `MPI_Alltoallv` calls use dummy one-byte buffers for OpenMPI compatibility.
+- Packet exchange now records round counts, empty-payload rounds, encoded-byte
+  totals, non-empty peer counts, and local execution time to make MPI wait time
+  and load imbalance visible in shard stats.
+- MPI packet exchange skips the `MPI_Alltoallv` payload collective when the
+  preceding size exchange shows that all ranks have zero bytes to send and
+  receive for the round.
+
+### Runahead optimization
+- Default runahead now uses the smallest latency between distinct configured
+  hosts, rather than the raw smallest graph path latency.
+- This avoids globally constraining scheduling rounds by graph self-loop edges
+  that are only relevant to traffic within one host.
+- Self-loop latency still contributes when two distinct hosts are configured on
+  the same network node.
+- Dynamic runahead no longer shrinks from packets sent back to the same host.
 
 ## Verified
 
@@ -90,6 +105,19 @@ Results:
   optimization; MPI barrier calls drop from 7,876 total to 4 total.
 - The 64-node `ethlambda` 120s distributed run completes in 894s wall-clock after
   the optimization, compared with the prior 967s baseline.
+- A vanilla single-process Shadow run of the same 64-node, 120s `ethlambda`
+  scenario completed in 868s wall-clock on the 16-core comparison host.
+- Extra metrics plus the empty-`MPI_Alltoallv` skip completed the 64-node run in
+  948s wall-clock; the empty-payload skip alone was not enough to improve the
+  real workload.
+- Manually overriding runahead with `--runahead 12ms` completed the 64-node run
+  in 501s wall-clock, showing that the 1ms graph self-loop was the dominant
+  scheduling bottleneck.
+- The host-pair default runahead change completed the 4-node safety run in 4s
+  with 598 packet-exchange rounds per shard.
+- The host-pair default runahead change completed the 64-node run in 487s
+  wall-clock with 6,215 packet-exchange rounds per shard, faster than the manual
+  12ms override and much faster than vanilla Shadow for this scenario.
 
 ## Notes
 
@@ -97,9 +125,9 @@ Results:
 - The MPI CTests are registered only in MPI-enabled CMake builds.
 - The previous explicit-partition `ethlambda` scenario should continue to use the configured
   `distributed_partition_file`; packet routing now flows through `OutboundRemotePacket.dst_shard`.
-- Worker hosts still need the merged source rebuilt/synced before rerunning the 4-host
-  `ethlambda` simulation.
-- After the packet-exchange optimization, the next visible MPI bottleneck is
-  `MPI_Alltoall` size exchange.
+- Worker hosts have been synced and rebuilt through the host-pair runahead
+  optimization for the latest distributed benchmarks.
+- After the host-pair runahead optimization, the next visible MPI bottleneck is
+  still `MPI_Alltoall` size exchange and load imbalance between shards.
 - The current MPI backend binds OpenMPI exported symbols directly. MPICH portability
   requires replacing the direct OpenMPI FFI with a portable C shim or generated bindings.

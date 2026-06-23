@@ -394,10 +394,29 @@ pub(crate) mod mpi_backend {
                 .iter()
                 .map(|&x| i32::try_from(x).expect("MPI receive batch too large"))
                 .collect();
-            let send_displs = displacements(&send_counts)?;
-            let recv_displs = displacements(&recv_counts)?;
             let send_total: usize = send_counts.iter().map(|&x| x as usize).sum();
             let recv_total: usize = recv_counts.iter().map(|&x| x as usize).sum();
+            let nonempty_send_destinations = send_counts.iter().filter(|&&x| x != 0).count();
+            let nonempty_recv_sources = recv_counts.iter().filter(|&&x| x != 0).count();
+            crate::core::worker::with_global_sim_stats(|stats| {
+                stats.record_mpi_packet_exchange_shape(
+                    send_total,
+                    recv_total,
+                    nonempty_send_destinations,
+                    nonempty_recv_sources,
+                )
+            });
+
+            if send_total == 0 && recv_total == 0 {
+                crate::core::worker::with_global_sim_stats(|stats| {
+                    stats.record_mpi_alltoallv_payload_skipped()
+                });
+                self.pending_received.lock().unwrap().clear();
+                return Ok(());
+            }
+
+            let send_displs = displacements(&send_counts)?;
+            let recv_displs = displacements(&recv_counts)?;
 
             let mut send_buf = Vec::with_capacity(send_total);
             for batch in &encoded {

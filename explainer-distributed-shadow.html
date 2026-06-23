@@ -1,0 +1,1121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Distributed Shadow, Explained</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500;600&family=Merriweather+Sans:wght@300;400;500;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #08131f;
+      --bg-2: #0c1b2b;
+      --panel: #102236;
+      --panel-2: #142c45;
+      --paper: #e8f0ed;
+      --paper-soft: #c9d9d5;
+      --muted: #87a7b4;
+      --line: rgba(145, 190, 204, 0.24);
+      --accent: #00f5d4;
+      --accent-2: #ffb703;
+      --accent-3: #8ecae6;
+      --chosen: #54d68a;
+      --rejected: #ff6b57;
+      --evolved: #61a5ff;
+      --warn: #ffb703;
+      --dark: #050a12;
+      --shadow: rgba(0, 0, 0, 0.35);
+      --glow: rgba(0, 245, 212, 0.38);
+      --font-display: "Bebas Neue", sans-serif;
+      --font-body: "Merriweather Sans", sans-serif;
+      --font-mono: "IBM Plex Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      color: var(--paper);
+      font-family: var(--font-body);
+      line-height: 1.65;
+      background:
+        radial-gradient(circle at 18% 8%, rgba(0, 245, 212, 0.15), transparent 28rem),
+        radial-gradient(circle at 82% 12%, rgba(255, 183, 3, 0.12), transparent 30rem),
+        linear-gradient(135deg, var(--bg), #07101a 42%, #0d1a29);
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.25));
+    }
+
+    a { color: var(--accent); }
+
+    .wrap {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      min-height: 92vh;
+      display: grid;
+      align-items: center;
+      padding: 70px 0 54px;
+      position: relative;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 38px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      letter-spacing: 0.22em;
+      color: var(--accent);
+      font-size: 0.82rem;
+      margin-bottom: 16px;
+    }
+
+    h1, h2, h3 {
+      font-family: var(--font-display);
+      line-height: 0.95;
+      letter-spacing: 0.02em;
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(4.3rem, 11vw, 9.6rem);
+      text-transform: uppercase;
+      max-width: 760px;
+      text-shadow: 0 0 32px rgba(0, 245, 212, 0.16);
+    }
+
+    h2 {
+      font-size: clamp(2.7rem, 6vw, 5.2rem);
+      margin-bottom: 22px;
+    }
+
+    h3 {
+      font-size: clamp(1.55rem, 3vw, 2.2rem);
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      color: var(--paper-soft);
+      font-style: italic;
+      font-size: clamp(1.05rem, 2vw, 1.45rem);
+      max-width: 740px;
+      margin: 20px 0 22px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--paper-soft);
+      background: rgba(16, 34, 54, 0.72);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .badge.done { border-color: rgba(84, 214, 138, 0.55); color: var(--chosen); }
+    .badge.warn { border-color: rgba(255, 183, 3, 0.6); color: var(--warn); }
+    .badge.info { border-color: rgba(97, 165, 255, 0.65); color: var(--evolved); }
+
+    .radar {
+      position: relative;
+      min-height: 430px;
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle, transparent 0 18%, rgba(0, 245, 212, 0.12) 18.5% 19%, transparent 19.5% 36%, rgba(0, 245, 212, 0.12) 36.5% 37%, transparent 37.5% 55%, rgba(0, 245, 212, 0.12) 55.5% 56%, transparent 56.5%),
+        linear-gradient(160deg, rgba(16, 34, 54, 0.92), rgba(8, 19, 31, 0.98));
+      box-shadow: 0 30px 80px var(--shadow), inset 0 0 60px rgba(0, 245, 212, 0.08);
+    }
+
+    .radar::before {
+      content: "";
+      position: absolute;
+      inset: 8%;
+      border-radius: 50%;
+      background: conic-gradient(from 0deg, rgba(0, 245, 212, 0.5), transparent 18%, transparent 100%);
+      animation: sweep 5.5s linear infinite;
+      filter: blur(0.5px);
+    }
+
+    .radar::after {
+      content: "MPI CONTROL ROOM";
+      position: absolute;
+      left: 20px;
+      bottom: 18px;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      letter-spacing: 0.18em;
+      color: var(--muted);
+    }
+
+    @keyframes sweep { to { transform: rotate(360deg); } }
+
+    .node {
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 22px var(--glow);
+    }
+
+    .node span {
+      position: absolute;
+      top: 22px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--font-mono);
+      color: var(--paper-soft);
+      font-size: 0.72rem;
+      white-space: nowrap;
+    }
+
+    .n1 { left: 18%; top: 22%; }
+    .n2 { right: 20%; top: 30%; background: var(--accent-2); box-shadow: 0 0 24px rgba(255, 183, 3, 0.36); }
+    .n3 { left: 30%; bottom: 24%; background: var(--evolved); box-shadow: 0 0 24px rgba(97, 165, 255, 0.35); }
+    .n4 { right: 28%; bottom: 20%; }
+
+    .section {
+      padding: 80px 0;
+      position: relative;
+    }
+
+    .section p {
+      color: var(--paper-soft);
+      font-size: 1.03rem;
+    }
+
+    .lead {
+      font-size: clamp(1.1rem, 2.4vw, 1.42rem) !important;
+      color: var(--paper) !important;
+      max-width: 880px;
+    }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin: 24px auto 6px;
+      width: min(520px, 80%);
+      color: var(--accent);
+      font-family: var(--font-mono);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 0.72rem;
+    }
+
+    .divider::before, .divider::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: linear-gradient(90deg, transparent, var(--line), transparent);
+    }
+
+    .divider .mark {
+      animation: pulse 2.4s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.6; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.08); }
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+      margin-top: 30px;
+    }
+
+    .card, .decision, .terminal, .code, .diagram, .quote, .callout, .metric-card {
+      border: 1px solid var(--line);
+      background: linear-gradient(160deg, rgba(20, 44, 69, 0.9), rgba(8, 19, 31, 0.9));
+      border-radius: 22px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+    }
+
+    .card {
+      padding: 24px;
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+    }
+
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(0, 245, 212, 0.5);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.36);
+    }
+
+    .card .icon {
+      font-family: var(--font-mono);
+      display: inline-grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      background: rgba(0, 245, 212, 0.12);
+      color: var(--accent);
+      margin-bottom: 16px;
+    }
+
+    .card h3 { color: var(--paper); }
+
+    .quote {
+      position: relative;
+      padding: 34px 34px 34px 40px;
+      margin: 34px 0;
+      border-left: 6px solid var(--accent-2);
+      background: linear-gradient(120deg, rgba(255, 183, 3, 0.12), rgba(0, 245, 212, 0.08));
+      overflow: hidden;
+    }
+
+    .quote::before {
+      content: "\201C";
+      position: absolute;
+      top: -24px;
+      left: 14px;
+      font-family: var(--font-display);
+      font-size: 8rem;
+      color: rgba(255, 183, 3, 0.16);
+      line-height: 1;
+    }
+
+    .quote p {
+      margin: 0;
+      color: var(--paper);
+      font-size: clamp(1.35rem, 3vw, 2rem);
+      font-style: italic;
+      line-height: 1.35;
+      position: relative;
+    }
+
+    .diagram, .terminal, .code {
+      padding: 24px;
+      overflow-x: auto;
+      background: linear-gradient(160deg, #030711, #07121f);
+    }
+
+    pre {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 0.86rem;
+      color: #d8fff8;
+      line-height: 1.55;
+      white-space: pre;
+    }
+
+    .dim { color: #6d8794; }
+    .hl { color: var(--accent); }
+    .amber { color: var(--accent-2); }
+    .blue { color: var(--evolved); }
+    .green { color: var(--chosen); }
+    .red { color: var(--rejected); }
+
+    .terminal .prompt { color: var(--accent); }
+    .terminal .cmd { color: #f7f7f7; }
+    .terminal .flag { color: var(--accent-2); }
+    .terminal .out { color: var(--muted); }
+
+    .code .kw { color: #ff7bc8; }
+    .code .ty { color: #8ecae6; }
+    .code .fn { color: #00f5d4; }
+    .code .str { color: #ffb703; }
+    .code .cm { color: #6d8794; }
+    .code .num { color: #54d68a; }
+
+    .decision {
+      padding: 22px;
+      margin: 16px 0;
+    }
+
+    .decision-head {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .tag {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      border-radius: 999px;
+      padding: 6px 9px;
+      border: 1px solid currentColor;
+    }
+
+    .tag.chose { color: var(--chosen); }
+    .tag.reject { color: var(--rejected); }
+    .tag.evolve { color: var(--evolved); }
+    .tag.warn { color: var(--warn); }
+
+    .decision h3 {
+      font-size: 1.8rem;
+      margin: 0;
+    }
+
+    .callout {
+      padding: 24px;
+      border-style: dashed;
+      background: rgba(255, 183, 3, 0.07);
+    }
+
+    .callout strong {
+      display: block;
+      color: var(--accent-2);
+      font-family: var(--font-display);
+      font-size: 1.8rem;
+      margin-bottom: 6px;
+      letter-spacing: 0.02em;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 16px;
+      margin: 26px 0;
+    }
+
+    .metric-card {
+      padding: 22px;
+    }
+
+    .metric-card .num {
+      font-family: var(--font-display);
+      font-size: clamp(2.7rem, 6vw, 4.8rem);
+      line-height: 0.95;
+      color: var(--accent);
+    }
+
+    .metric-card .label {
+      font-family: var(--font-mono);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.75rem;
+      margin-top: 8px;
+    }
+
+    .metric-card small {
+      display: block;
+      color: var(--paper-soft);
+      margin-top: 10px;
+    }
+
+    .track {
+      margin: 24px 0;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      background: rgba(16, 34, 54, 0.7);
+    }
+
+    .bar {
+      height: 18px;
+      border-radius: 999px;
+      overflow: hidden;
+      display: flex;
+      background: rgba(255,255,255,0.08);
+    }
+
+    .seg { height: 100%; }
+    .seg.done { background: var(--chosen); width: 42%; }
+    .seg.active { background: var(--accent-2); width: 38%; }
+    .seg.todo { background: var(--evolved); width: 20%; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 12px;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+
+    .timeline {
+      position: relative;
+      margin: 34px 0 0;
+      padding-left: 32px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 9px;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: linear-gradient(var(--chosen), var(--accent-2), var(--evolved));
+      border-radius: 999px;
+    }
+
+    .step {
+      position: relative;
+      padding: 0 0 28px 18px;
+    }
+
+    .step::before {
+      content: "";
+      position: absolute;
+      left: -30px;
+      top: 5px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 22px var(--glow);
+    }
+
+    .step .phase {
+      font-family: var(--font-mono);
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.74rem;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+      align-items: start;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 650ms ease, transform 650ms ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .footer {
+      padding: 64px 0 80px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      border-top: 1px solid var(--line);
+    }
+
+    @media (max-width: 860px) {
+      .hero-grid, .two-col { grid-template-columns: 1fr; }
+      .hero { min-height: auto; padding-top: 46px; }
+      .radar { min-height: 330px; }
+      .section { padding: 58px 0; }
+    }
+
+    @media (max-width: 520px) {
+      .wrap { width: min(100% - 22px, 1120px); }
+      .card, .decision, .terminal, .code, .diagram, .quote, .callout, .metric-card { border-radius: 16px; }
+      .quote { padding: 26px 22px 26px 28px; }
+      pre { font-size: 0.76rem; }
+      .meta { gap: 8px; }
+      .badge { font-size: 0.66rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero wrap">
+    <div class="hero-grid">
+      <div class="reveal visible">
+        <div class="eyebrow">Distributed systems field report</div>
+        <h1>Distributed Shadow</h1>
+        <p class="subtitle">A coffee-shop explanation of why we split a deterministic network simulator across machines, how MPI made it work, and why the benchmark story got interesting.</p>
+        <div class="meta">
+          <span class="badge done">built: MPI backend</span>
+          <span class="badge done">tested: 64 ethlambda nodes</span>
+          <span class="badge warn">sim time: 120 seconds</span>
+          <span class="badge info">case study: distributed vs vanilla</span>
+        </div>
+      </div>
+      <div class="radar reveal visible" aria-label="Control room radar illustration">
+        <div class="node n1"><span>rank 0</span></div>
+        <div class="node n2"><span>rank 1</span></div>
+        <div class="node n3"><span>rank 2</span></div>
+        <div class="node n4"><span>rank 3</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="divider"><span class="mark">[sync]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>The problem: one simulator, too much world</h2>
+      <p class="lead">Shadow is a deterministic network simulator. That means it runs real applications, but inside a controlled simulated network where time, packets, sockets, and host behavior are repeatable. Distributed Shadow asks a simple question: what if one physical machine is not enough?</p>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">01</div>
+          <h3>Vanilla Shadow</h3>
+          <p>One Shadow process owns the whole simulated world. It can use many worker threads, but all simulated hosts live inside one operating-system process on one machine.</p>
+        </div>
+        <div class="card">
+          <div class="icon">02</div>
+          <h3>Distributed Shadow</h3>
+          <p>Several Shadow processes each own a slice of the simulated hosts. We call each slice a <strong>shard</strong>: a partition of the simulated world.</p>
+        </div>
+        <div class="card">
+          <div class="icon">03</div>
+          <h3>The hard part</h3>
+          <p>If host A on shard 0 sends a packet to host B on shard 3, that packet must cross a real machine boundary while still arriving at the correct simulated time.</p>
+        </div>
+      </div>
+      <div class="quote">
+        <p>Distributed Shadow is not about making the simulator less careful. It is about making the careful simulator fit across more hardware.</p>
+      </div>
+      <p>A useful analogy: imagine a giant model train city. Vanilla Shadow is one conductor controlling every train from one desk. Distributed Shadow gives four conductors four districts, but they still need one clock and a rulebook so trains crossing district borders do not crash.</p>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>Why we took this approach</h2>
+      <p class="lead">The starting point was not, "let us add MPI because MPI is cool." The starting point was a practical bottleneck: simulations like the 64-node <code>ethlambda</code> scenario are heavy, and we wanted to know if more machines could help.</p>
+      <div class="two-col">
+        <div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag chose">chose</span><h3>Shard by simulated host</h3></div>
+            <p>Each MPI rank owns a subset of hosts. That keeps most existing Shadow internals intact: local events, local queues, local sockets, local workers. Only cross-shard packets become special.</p>
+          </div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag chose">chose</span><h3>Exchange packet-arrival events</h3></div>
+            <p>We do not ship entire process state between machines. We ship timestamped packet events. That is the smallest useful message: "deliver this packet to host B at simulated time T."</p>
+          </div>
+        </div>
+        <div class="callout">
+          <strong>Mental model: postal districts</strong>
+          <p>Each shard is a postal district. Mail within the district is cheap. Mail to another district goes through the central sorting office. MPI is that sorting office. The global simulated clock is the delivery schedule everyone must obey.</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="divider"><span class="mark">[map]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>The architecture in one picture</h2>
+      <p class="lead">The shape is simple once you see it. Local work stays local. Remote packets become serialized events. MPI collectives move those events between ranks. A global-min calculation advances the safe simulation window.</p>
+      <div class="diagram">
+<pre><span class="dim">                 real cluster: one Shadow process per MPI rank</span>
+
+        <span class="hl">distributed-shadow-01</span>    <span class="hl">distributed-shadow-02</span>    <span class="hl">distributed-shadow-03</span>    <span class="hl">distributed-shadow-04</span>
+        +----------------+    +----------------+    +----------------+    +----------------+
+        | shard 0        |    | shard 1        |    | shard 2        |    | shard 3        |
+        | hosts 0..15    |    | hosts 16..31   |    | hosts 32..47   |    | hosts 48..63   |
+        | workers: 16    |    | workers: 16    |    | workers: 16    |    | workers: 16    |
+        +-------+--------+    +-------+--------+    +-------+--------+    +-------+--------+
+                |                     |                     |                     |
+                +---------------------+----------+----------+---------------------+
+                                          <span class="amber">MPI</span>
+                       <span class="green">Alltoall sizes</span> + <span class="green">Alltoallv packet payloads</span>
+                                <span class="blue">Allreduce(MIN next event time)</span>
+
+        <span class="dim">inside each shard: regular Shadow event queues, sockets, shims, host scheduling</span></pre>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">SID</div>
+          <h3><code>ShardId</code></h3>
+          <p>A small identifier saying which simulated district owns a host. It is the address label for distributed routing.</p>
+        </div>
+        <div class="card">
+          <div class="icon">PM</div>
+          <h3><code>PartitionMap</code></h3>
+          <p>The table that maps hostnames to shards. In the 64-node run, we used explicit partitions: 16 hosts per rank.</p>
+        </div>
+        <div class="card">
+          <div class="icon">RPE</div>
+          <h3><code>RemotePacketEvent</code></h3>
+          <p>A serialized promise: this packet should appear at the destination host at this simulated delivery time.</p>
+        </div>
+        <div class="card">
+          <div class="icon">MPI</div>
+          <h3>Collectives</h3>
+          <p>All ranks participate together. This avoids the classic "you wait for me while I wait for you" deadlock.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>The roads we did not take</h2>
+      <p class="lead">The rejected designs are where the lesson gets sharp. Distributed simulation is full of ideas that sound fine until the timing model bites back.</p>
+      <div class="decision">
+        <div class="decision-head"><span class="tag reject">rejected</span><h3>Just run vanilla Shadow harder</h3></div>
+        <p>Vanilla Shadow already supports parallelism. For our comparison, vanilla used one 16-core, 64GB machine with <code>--parallelism 16</code>. But one process still owns all memory, all hosts, and all queues. If the goal is to use multiple physical machines, thread-level parallelism is not enough.</p>
+      </div>
+      <div class="decision">
+        <div class="decision-head"><span class="tag reject">rejected</span><h3>Naive blocking send and receive</h3></div>
+        <p>Ordered point-to-point sends look natural: shard 0 sends to shard 1, shard 1 sends to shard 2, and so on. In practice, that can deadlock. Everyone can end up waiting for someone else to receive. MPI collectives solved this by making the exchange a coordinated group operation.</p>
+      </div>
+      <div class="decision">
+        <div class="decision-head"><span class="tag reject">rejected</span><h3>Invent a custom TCP protocol first</h3></div>
+        <p>We could have opened sockets between Shadow processes and designed our own message framing, retry behavior, ordering rules, and synchronization protocol. That would be educational, but also a lot of new failure surface. MPI already gives us the exact shape we need: launch a group of processes, give each one a rank, and make them participate in coordinated communication rounds.</p>
+      </div>
+      <div class="decision">
+        <div class="decision-head"><span class="tag reject">rejected</span><h3>Route by host ID modulo rank count</h3></div>
+        <p>Modulo routing is tempting because it is simple. But explicit partition files let us say exactly where each host lives. The fix was to route through <code>OutboundRemotePacket.dst_shard</code>, derived from the configured partition map, not a guess.</p>
+      </div>
+      <div class="decision">
+        <div class="decision-head"><span class="tag reject">rejected</span><h3>Assume a shared filesystem fixes everything</h3></div>
+        <p>Shared paths help with inputs, but they do not move live packets at simulated time. We still need a real distributed protocol for packet events and global time coordination.</p>
+      </div>
+    </section>
+
+    <div class="divider"><span class="mark">[protocol]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>The protocol: run, exchange, agree, repeat</h2>
+      <p class="lead">A distributed simulator lives by one rule: nobody may run so far ahead that a late remote packet would have needed to arrive in the past.</p>
+      <div class="timeline">
+        <div class="step">
+          <div class="phase">phase 1</div>
+          <h3>Run a safe local window</h3>
+          <p>Each shard runs its local hosts until the current window end. Local packets go straight into local event queues.</p>
+        </div>
+        <div class="step">
+          <div class="phase">phase 2</div>
+          <h3>Serialize remote packets</h3>
+          <p>If a packet belongs to another shard, Shadow turns it into a remote packet event with source host, destination host, delivery time, and payload.</p>
+        </div>
+        <div class="step">
+          <div class="phase">phase 3</div>
+          <h3>Exchange through MPI</h3>
+          <p><code>MPI_Alltoall</code> exchanges batch sizes. <code>MPI_Alltoallv</code> exchanges the actual payload bytes. Every rank enters the same collective operation.</p>
+        </div>
+        <div class="step">
+          <div class="phase">phase 4</div>
+          <h3>Find the next global event</h3>
+          <p><code>MPI_Allreduce(MPI_MIN)</code> finds the earliest next event across all shards. That becomes the start of the next window.</p>
+        </div>
+      </div>
+      <div class="code">
+<pre><span class="cm">// The optimization we added in spirit:</span>
+worker_shared.<span class="fn">send_remote_packets</span>(remote_packet_exchange)?;
+
+<span class="kw">if</span> remote_packet_exchange.<span class="fn">requires_send_complete_synchronization</span>() {
+    controller.<span class="fn">remote_packet_send_complete</span>()?;
+}
+
+worker_shared.<span class="fn">receive_remote_packets</span>(remote_packet_exchange)?;</pre>
+      </div>
+      <p>The subtle bit: for MPI, the packet exchange already synchronizes all ranks. So an extra post-send barrier was not buying correctness. It was buying waiting.</p>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>MPI, without the fog machine</h2>
+      <p class="lead">MPI stands for <strong>Message Passing Interface</strong>. It is a standard API for programs that run as many cooperating processes and exchange messages. Think of it as the radio protocol used by a fleet of ships: every ship has a call sign, everyone knows who is in the fleet, and there are standard maneuvers for broadcasting, gathering, and synchronizing.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">RANK</div>
+          <h3>Ranks are identities</h3>
+          <p>An MPI program starts multiple copies of the same executable. Each copy gets a <strong>rank</strong>, usually numbered 0, 1, 2, and so on. In Distributed Shadow, rank 0 owns shard 0, rank 1 owns shard 1, and so on.</p>
+        </div>
+        <div class="card">
+          <div class="icon">WORLD</div>
+          <h3>A communicator is the room</h3>
+          <p><code>MPI_COMM_WORLD</code> is the default group containing all ranks in the job. When we call a collective on this communicator, every Shadow shard in the run participates.</p>
+        </div>
+        <div class="card">
+          <div class="icon">COLL</div>
+          <h3>Collectives are group moves</h3>
+          <p>A collective operation is not one process talking to one process. It is the whole group doing one coordinated move: everyone checks in, exchanges data, or agrees on a result.</p>
+        </div>
+        <div class="card">
+          <div class="icon">SYNC</div>
+          <h3>Progress is coordinated</h3>
+          <p>MPI does not simulate the network for us. Shadow still owns simulated time. MPI only moves real bytes between real processes so Shadow can preserve the simulated ordering.</p>
+        </div>
+      </div>
+      <div class="diagram">
+<pre><span class="dim">MPI launch model</span>
+
+<span class="prompt">mpirun -np 4 shadow ...</span>
+          |
+          +--> <span class="hl">process A</span>: rank 0, shard 0, owns hosts 0..15
+          +--> <span class="hl">process B</span>: rank 1, shard 1, owns hosts 16..31
+          +--> <span class="hl">process C</span>: rank 2, shard 2, owns hosts 32..47
+          +--> <span class="hl">process D</span>: rank 3, shard 3, owns hosts 48..63
+
+<span class="dim">All ranks run the same binary. Their rank tells them which slice of the world to own.</span></pre>
+      </div>
+      <div class="quote">
+        <p>MPI is not a database, not a queue, and not magic shared memory. It is a disciplined way for a fixed group of processes to talk in lockstep.</p>
+      </div>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>How the MPI operations map to Shadow</h2>
+      <p class="lead">Distributed Shadow uses a small vocabulary of MPI operations. Each one has a job in the simulation rhythm. Once you know these four verbs, the backend becomes much less mysterious.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">BAR</div>
+          <h3><code>MPI_Barrier</code></h3>
+          <p>A barrier means: nobody leaves until everybody arrives. We still use it at startup. We removed the redundant post-packet-exchange barrier because <code>MPI_Alltoall</code> and <code>MPI_Alltoallv</code> already make every rank participate.</p>
+        </div>
+        <div class="card">
+          <div class="icon">MIN</div>
+          <h3><code>MPI_Allreduce(MIN)</code></h3>
+          <p>Each shard reports its earliest next local event time. MPI returns the global minimum to every shard. That tells everyone where the next safe simulation window begins.</p>
+        </div>
+        <div class="card">
+          <div class="icon">SIZE</div>
+          <h3><code>MPI_Alltoall</code></h3>
+          <p>Every shard tells every other shard how many bytes it plans to send. This is the envelope count before mailing the packages. The receiver needs these sizes before it can allocate receive buffers.</p>
+        </div>
+        <div class="card">
+          <div class="icon">DATA</div>
+          <h3><code>MPI_Alltoallv</code></h3>
+          <p>The <code>v</code> means variable-sized. Shard 0 might send 10 bytes to shard 1 and 80,000 bytes to shard 3. <code>Alltoallv</code> handles uneven payloads, which is exactly what packet traffic looks like.</p>
+        </div>
+      </div>
+      <div class="diagram">
+<pre><span class="dim">One remote-packet exchange round</span>
+
+rank 0 send sizes: [0, 1200, 0, 8200]
+rank 1 send sizes: [900, 0, 300, 0]
+rank 2 send sizes: [0, 500, 0, 1100]
+rank 3 send sizes: [4400, 0, 700, 0]
+          |
+          v
+<span class="green">MPI_Alltoall</span>  --> everyone learns how much it will receive
+          |
+          v
+allocate receive buffers
+          |
+          v
+<span class="green">MPI_Alltoallv</span> --> actual serialized RemotePacketEvent bytes move
+          |
+          v
+decode bytes, inject packets into local event queues</pre>
+      </div>
+      <div class="code">
+<pre><span class="cm">// The MPI backend's communication shape, simplified:</span>
+<span class="kw">let</span> send_sizes = encoded_batches.<span class="fn">map</span>(|batch| batch.<span class="fn">len</span>());
+
+<span class="fn">MPI_Alltoall</span>(send_sizes, recv_sizes);      <span class="cm">// exchange envelope sizes</span>
+<span class="fn">MPI_Alltoallv</span>(send_bytes, recv_bytes);      <span class="cm">// exchange packet payloads</span>
+<span class="fn">MPI_Allreduce</span>(local_next_event, MIN);      <span class="cm">// agree on global time</span></pre>
+      </div>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>Why MPI was the right first distributed backend</h2>
+      <p class="lead">The important word is <em>first</em>. MPI was not chosen because it is the only possible answer. It was chosen because it let us test the real distributed-simulation question without first building an entire networking substrate from scratch.</p>
+      <div class="two-col">
+        <div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag chose">chose</span><h3>Use MPI collectives for correctness-shaped communication</h3></div>
+            <p>Shadow naturally runs in rounds: execute a window, exchange remote events, agree on the next time. MPI collectives are also round-shaped. That fit reduced design risk.</p>
+          </div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag chose">chose</span><h3>Let <code>mpirun</code> handle process placement</h3></div>
+            <p>We did not need to write a cluster launcher. OpenMPI already starts ranks across hosts using a hostfile, wires them together, and gives each process its rank and world size.</p>
+          </div>
+        </div>
+        <div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag warn">cost</span><h3>Collectives can become the bottleneck</h3></div>
+            <p>MPI made the backend correct and simple enough to validate, but it also made the cost visible. In the optimized 64-node run, <code>MPI_Alltoall</code> size exchange became the largest remaining MPI timing bucket.</p>
+          </div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag warn">cost</span><h3>Portability is not free</h3></div>
+            <p>The current backend binds OpenMPI exported symbols directly. That worked for our cluster, but a production-quality backend should add a small C shim or generated bindings so MPICH and other MPI implementations are cleaner targets.</p>
+          </div>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Why not message queues?</strong>
+        <p>A queue like Kafka or RabbitMQ is great when producers and consumers are loosely coupled. Shadow shards are tightly coupled by simulated time. We need every rank to finish the same exchange round before time advances. MPI's collective model is closer to the simulator's heartbeat.</p>
+      </div>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>Tools, methods, and why they fit</h2>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">MPI</div>
+          <h3>OpenMPI</h3>
+          <p>Chosen because it gives battle-tested collective operations across physical hosts. The downside: the current implementation binds OpenMPI symbols directly, so MPICH portability needs a shim or generated bindings.</p>
+        </div>
+        <div class="card">
+          <div class="icon">CMAKE</div>
+          <h3><code>SHADOW_USE_MPI=ON</code></h3>
+          <p>MPI support is feature-gated. Vanilla Shadow builds normally; the MPI backend appears only when explicitly enabled.</p>
+        </div>
+        <div class="card">
+          <div class="icon">TCP</div>
+          <h3>New TCP path</h3>
+          <p>Multi-shard mode requires <code>experimental.use_new_tcp: true</code>. Legacy C TCP packets cannot be serialized for cross-shard delivery.</p>
+        </div>
+        <div class="card">
+          <div class="icon">YAML</div>
+          <h3>Partition files</h3>
+          <p>Explicit host-to-shard mapping makes the experiment reproducible. In our benchmark, hosts 0..15 went to shard 0, 16..31 to shard 1, and so on.</p>
+        </div>
+      </div>
+      <div class="terminal">
+<pre><span class="prompt">$</span> <span class="cmd">cmake -S . -B build</span> <span class="flag">-DCMAKE_BUILD_TYPE=Release</span> <span class="flag">-DSHADOW_USE_MPI=ON</span>
+<span class="out">-- MPI found: OpenMPI</span>
+
+<span class="prompt">$</span> <span class="cmd">mpirun -np 4 --hostfile mpi-hostfile shadow</span> <span class="flag">--parallelism 16</span> <span class="flag">shadow.yaml</span>
+<span class="out">rank 0 -> shard 0, rank 1 -> shard 1, rank 2 -> shard 2, rank 3 -> shard 3</span></pre>
+      </div>
+    </section>
+
+    <div class="divider"><span class="mark">[debug]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>The messy parts that taught us something</h2>
+      <p class="lead">This was not a clean march from design doc to victory. The simulator told us where our assumptions were wrong.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">BUG</div>
+          <h3>Wrong-shard packets</h3>
+          <p>We saw errors like "host belongs to shard 0, not 1." That exposed the danger of deriving routes from host ID modulo rank count instead of the real partition map.</p>
+        </div>
+        <div class="card">
+          <div class="icon">WAIT</div>
+          <h3>Deadlock-shaped exchange</h3>
+          <p>The old ordered blocking exchange could stall. Switching to <code>MPI_Alltoall</code> plus <code>MPI_Alltoallv</code> made every rank participate in the same rhythm.</p>
+        </div>
+        <div class="card">
+          <div class="icon">ARG</div>
+          <h3>Zero-byte MPI buffers</h3>
+          <p>When we stopped serializing empty batches, OpenMPI rejected zero-length buffer pointers in <code>MPI_Alltoallv</code>. The fix was tiny but important: use dummy one-byte buffers when totals are zero.</p>
+        </div>
+        <div class="card">
+          <div class="icon">TAX</div>
+          <h3>The hidden collective tax</h3>
+          <p>After removing the extra barrier, the next bottleneck became obvious: <code>MPI_Alltoall</code> size exchange dominated aggregate MPI time in the optimized 64-node run.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>The optimization: remove waiting that did not protect correctness</h2>
+      <p class="lead">The core improvement was not exotic. It was the kind of performance win experts love: delete a redundant synchronization point, but only for the backend where it is provably redundant.</p>
+      <div class="two-col">
+        <div class="decision">
+          <div class="decision-head"><span class="tag evolve">evolved</span><h3>Backend-specific synchronization</h3></div>
+          <p>Socket-based exchange may still need an external post-send sync. MPI does not, because its collectives already force every rank through the same exchange.</p>
+        </div>
+        <div class="decision">
+          <div class="decision-head"><span class="tag chose">chose</span><h3>Skip empty payload serialization</h3></div>
+          <p>Empty remote-packet groups no longer become encoded empty packet batches. That reduced payload exchange and encode/decode work while preserving the size exchange needed to discover incoming packets.</p>
+        </div>
+      </div>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="num">7,876</div>
+          <div class="label">MPI barriers before</div>
+          <small>4-node 120s run, aggregate across ranks.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">4</div>
+          <div class="label">MPI barriers after</div>
+          <small>Only startup synchronization remained in the same run.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">1.02s</div>
+          <div class="label">payload time before</div>
+          <small>Aggregate <code>MPI_Alltoallv</code> payload time in the 4-node run.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">0.12s</div>
+          <div class="label">payload time after</div>
+          <small>Same metric after empty-batch and barrier optimization.</small>
+        </div>
+      </div>
+    </section>
+
+    <div class="divider"><span class="mark">[bench]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>Case study: distributed vs vanilla Shadow</h2>
+      <p class="lead">We ran the same 64-node <code>ethlambda</code> scenario for 120 seconds of simulated time. The surprising result: distributed Shadow improved after optimization, but vanilla Shadow on one strong 16-core machine was still slightly faster for this workload.</p>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="num">967s</div>
+          <div class="label">distributed before optimization</div>
+          <small>64 ethlambda nodes, 120s simulated time, four hosts.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">894s</div>
+          <div class="label">distributed after optimization</div>
+          <small>Same distributed setup after skipping redundant MPI barrier and empty batches.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">868s</div>
+          <div class="label">vanilla Shadow</div>
+          <small>Same scenario on <code>shadow-performance</code>, one 16-core, 64GB host.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">2.9%</div>
+          <div class="label">vanilla faster</div>
+          <small>Vanilla beat optimized distributed by 26 seconds in this run.</small>
+        </div>
+      </div>
+      <div class="terminal">
+<pre><span class="prompt">$</span> <span class="cmd">distributed run</span>
+<span class="out">hardware: distributed-shadow-01..04, one MPI rank per physical host</span>
+<span class="out">per rank: --parallelism 16, 16 ethlambda nodes per shard</span>
+<span class="out">optimized wall-clock: 894 seconds, exit_code 0</span>
+
+<span class="prompt">$</span> <span class="cmd">vanilla run</span>
+<span class="out">hardware: shadow-performance, 16 cores, 64GB RAM</span>
+<span class="out">command shape: shadow --parallelism 16 shadow-vanilla-run1.yaml</span>
+<span class="out">wall-clock: 868 seconds, exit_code 0</span></pre>
+      </div>
+      <div class="quote">
+        <p>More machines are not automatically faster. If the workload forces the machines to talk constantly, the network becomes part of the algorithm.</p>
+      </div>
+      <div class="track">
+        <div class="bar"><span class="seg done"></span><span class="seg active"></span><span class="seg todo"></span></div>
+        <div class="legend">
+          <span><span class="dot" style="background: var(--chosen)"></span>implemented and validated</span>
+          <span><span class="dot" style="background: var(--accent-2)"></span>current performance frontier</span>
+          <span><span class="dot" style="background: var(--evolved)"></span>future protocol work</span>
+        </div>
+      </div>
+      <p>The current frontier is clear: in the optimized 64-node distributed run, aggregate <code>MPI_Alltoall</code> size-exchange time was about 2,224 seconds across ranks. That does not mean the wall clock was 2,224 seconds; it means ranks collectively spent a lot of waiting time in that operation. The next serious improvement likely needs fewer synchronization rounds or a smarter exchange protocol.</p>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>What an expert notices</h2>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">AHA</div>
+          <h3>Determinism is the real product</h3>
+          <p>The goal is not merely to move packets quickly. The goal is to move packets while preserving repeatable event ordering. That constraint shapes every design choice.</p>
+        </div>
+        <div class="card">
+          <div class="icon">CUT</div>
+          <h3>The partition is a performance feature</h3>
+          <p>If most traffic crosses shard boundaries, MPI becomes hot. A good partition minimizes the "cut" between shards, like drawing city districts so commuters do not all cross the same bridge.</p>
+        </div>
+        <div class="card">
+          <div class="icon">CLK</div>
+          <h3>Time synchronization is expensive</h3>
+          <p>Every global agreement is a tax. The simulator pays it in exchange for correctness. Experts ask: can we safely agree less often?</p>
+        </div>
+        <div class="card">
+          <div class="icon">FIT</div>
+          <h3>Benchmark fit matters</h3>
+          <p>This 64-node workload fit a 16-core, 64GB vanilla machine well enough that distributed overhead outweighed the benefit. A larger workload may cross that line.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap reveal">
+      <h2>Things I would tell a friend before they try this</h2>
+      <div class="decision">
+        <div class="decision-head"><span class="tag warn">pitfall</span><h3>Do not benchmark only the happy path</h3></div>
+        <p>A tiny 4-node run proved correctness and showed barrier counts dropping, but wall-clock time was too short and noisy. The 64-node run told the real performance story.</p>
+      </div>
+      <div class="decision">
+        <div class="decision-head"><span class="tag warn">pitfall</span><h3>Keep absolute paths identical across hosts</h3></div>
+        <p>Every rank needs to find the same config inputs, genesis files, topology file, and binary paths. A distributed simulator is allergic to "it works on my machine" path drift.</p>
+      </div>
+      <div class="decision">
+        <div class="decision-head"><span class="tag warn">pitfall</span><h3>Watch the collectives, not just CPU usage</h3></div>
+        <p>CPU graphs can look calm while ranks are waiting inside MPI. The useful metrics were <code>mpi_alltoall_sizes_time_ns</code>, <code>mpi_alltoallv_payload_time_ns</code>, and barrier/allreduce counters.</p>
+      </div>
+    </section>
+
+    <div class="divider"><span class="mark">[transfer]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>Lessons you can reuse elsewhere</h2>
+      <p class="lead">Distributed Shadow is a network simulator story, but the principles travel well.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">DB</div>
+          <h3>Databases</h3>
+          <p>Sharding a database has the same shape: local queries are cheap, cross-shard joins are expensive, and partitioning strategy can matter more than raw machine count.</p>
+        </div>
+        <div class="card">
+          <div class="icon">ML</div>
+          <h3>Machine learning</h3>
+          <p>Distributed training can be slower than single-machine training when gradient synchronization dominates. More GPUs do not help if the all-reduce is the bottleneck.</p>
+        </div>
+        <div class="card">
+          <div class="icon">OPS</div>
+          <h3>Production systems</h3>
+          <p>Microservices have a similar trap: splitting a monolith can create network calls where function calls used to be. The architecture must earn the new communication cost.</p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>The portable rule</strong>
+        <p>Distribution helps when the work you move apart is bigger than the coordination you add. If coordination grows faster than useful work, you built a very impressive waiting machine.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer wrap">
+    Built from the actual Distributed Shadow implementation notes, MPI optimization commit <code>fa00af433</code>, and the 64-node ethlambda benchmark runs on distributed-shadow and shadow-performance. Single file. No JavaScript dependencies. Fonts from Google Fonts.
+  </footer>
+
+  <script>
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      }
+    }, { threshold: 0.12 });
+
+    document.querySelectorAll('.reveal').forEach((el, index) => {
+      el.style.transitionDelay = `${Math.min(index * 35, 220)}ms`;
+      observer.observe(el);
+    });
+  </script>
+</body>
+</html>

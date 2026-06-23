@@ -114,6 +114,13 @@ impl SharedSimStats {
             add_duration_ns(distributed.control_barrier_wait_time_ns, duration);
     }
 
+    pub fn record_distributed_local_execution_time(&self, duration: std::time::Duration) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.local_execution_count += 1;
+        distributed.local_execution_time_ns =
+            add_duration_ns(distributed.local_execution_time_ns, duration);
+    }
+
     pub fn record_mpi_barrier_wait(&self, duration: std::time::Duration) {
         let mut distributed = self.distributed.lock().unwrap();
         distributed.mpi_barrier_wait_count += 1;
@@ -140,6 +147,38 @@ impl SharedSimStats {
         distributed.mpi_alltoallv_payload_count += 1;
         distributed.mpi_alltoallv_payload_time_ns =
             add_duration_ns(distributed.mpi_alltoallv_payload_time_ns, duration);
+    }
+
+    pub fn record_mpi_alltoallv_payload_skipped(&self) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.mpi_alltoallv_payload_skipped_count += 1;
+    }
+
+    pub fn record_mpi_packet_exchange_shape(
+        &self,
+        send_bytes: usize,
+        recv_bytes: usize,
+        nonempty_send_destinations: usize,
+        nonempty_recv_sources: usize,
+    ) {
+        let mut distributed = self.distributed.lock().unwrap();
+        distributed.mpi_packet_exchange_round_count += 1;
+        distributed.mpi_packet_exchange_encoded_bytes_sent += u64::try_from(send_bytes).unwrap();
+        distributed.mpi_packet_exchange_encoded_bytes_received +=
+            u64::try_from(recv_bytes).unwrap();
+        distributed.mpi_packet_exchange_nonempty_send_destinations +=
+            u64::try_from(nonempty_send_destinations).unwrap();
+        distributed.mpi_packet_exchange_nonempty_recv_sources +=
+            u64::try_from(nonempty_recv_sources).unwrap();
+        if send_bytes == 0 {
+            distributed.mpi_packet_exchange_empty_send_round_count += 1;
+        }
+        if recv_bytes == 0 {
+            distributed.mpi_packet_exchange_empty_recv_round_count += 1;
+        }
+        if send_bytes == 0 && recv_bytes == 0 {
+            distributed.mpi_packet_exchange_empty_payload_round_count += 1;
+        }
     }
 
     pub fn record_remote_packet_encode_time(&self, duration: std::time::Duration) {
@@ -197,6 +236,8 @@ pub struct DistributedSimStats {
     pub remote_packets_received: u64,
     pub remote_packet_payload_bytes_received: u64,
     pub remote_packet_cut_matrix: BTreeMap<String, DistributedShardCutStats>,
+    pub local_execution_count: u64,
+    pub local_execution_time_ns: u64,
     pub control_barrier_wait_count: u64,
     pub control_barrier_wait_time_ns: u64,
     pub mpi_barrier_wait_count: u64,
@@ -207,6 +248,15 @@ pub struct DistributedSimStats {
     pub mpi_alltoall_sizes_time_ns: u64,
     pub mpi_alltoallv_payload_count: u64,
     pub mpi_alltoallv_payload_time_ns: u64,
+    pub mpi_alltoallv_payload_skipped_count: u64,
+    pub mpi_packet_exchange_round_count: u64,
+    pub mpi_packet_exchange_empty_send_round_count: u64,
+    pub mpi_packet_exchange_empty_recv_round_count: u64,
+    pub mpi_packet_exchange_empty_payload_round_count: u64,
+    pub mpi_packet_exchange_encoded_bytes_sent: u64,
+    pub mpi_packet_exchange_encoded_bytes_received: u64,
+    pub mpi_packet_exchange_nonempty_send_destinations: u64,
+    pub mpi_packet_exchange_nonempty_recv_sources: u64,
     pub remote_packet_encode_count: u64,
     pub remote_packet_encode_time_ns: u64,
     pub remote_packet_decode_count: u64,

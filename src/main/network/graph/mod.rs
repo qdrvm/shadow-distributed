@@ -472,6 +472,26 @@ impl<T: Eq + Hash + std::fmt::Display + Clone + Copy> RoutingInfo<T> {
     pub fn get_smallest_latency_ns(&self) -> Option<u64> {
         self.paths.values().map(|x| x.latency_ns).min()
     }
+
+    pub fn get_smallest_latency_ns_between_hosts<I>(&self, host_network_nodes: I) -> Option<u64>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let host_network_nodes: Vec<T> = host_network_nodes.into_iter().collect();
+
+        host_network_nodes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, start)| {
+                host_network_nodes
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(j, end)| {
+                        (i != j).then(|| self.paths.get(&(*start, *end)).map(|x| x.latency_ns))?
+                    })
+            })
+            .min()
+    }
 }
 
 /// Read and decompress a file.
@@ -641,6 +661,54 @@ mod tests {
                 assert_eq!(lookup_latency(node_2, node_2), 7777);
             }
         }
+    }
+
+    #[test]
+    fn test_smallest_latency_between_hosts() {
+        let routing_info = RoutingInfo::new(HashMap::from([
+            (
+                (0, 0),
+                PathProperties {
+                    latency_ns: 1,
+                    packet_loss: 0.0,
+                },
+            ),
+            (
+                (0, 1),
+                PathProperties {
+                    latency_ns: 12,
+                    packet_loss: 0.0,
+                },
+            ),
+            (
+                (1, 0),
+                PathProperties {
+                    latency_ns: 12,
+                    packet_loss: 0.0,
+                },
+            ),
+            (
+                (1, 1),
+                PathProperties {
+                    latency_ns: 1,
+                    packet_loss: 0.0,
+                },
+            ),
+        ]));
+
+        assert_eq!(routing_info.get_smallest_latency_ns(), Some(1));
+        assert_eq!(
+            routing_info.get_smallest_latency_ns_between_hosts([0, 1]),
+            Some(12)
+        );
+        assert_eq!(
+            routing_info.get_smallest_latency_ns_between_hosts([0, 0]),
+            Some(1)
+        );
+        assert_eq!(
+            routing_info.get_smallest_latency_ns_between_hosts([0]),
+            None
+        );
     }
 
     #[test]

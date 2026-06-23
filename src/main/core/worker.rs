@@ -382,7 +382,6 @@ impl Worker {
 
         let delay = Worker::with(|w| w.shared.latency(src_ip, dst_ip).unwrap()).unwrap();
 
-        Worker::update_lowest_used_latency(delay);
         Worker::with(|w| w.shared.increment_packet_count(src_ip, dst_ip)).unwrap();
 
         // TODO: this should change for sending to remote manager (on a different machine); this is
@@ -404,6 +403,10 @@ impl Worker {
         let dst_packet = packetrc.new_copy_inner();
         let src_host_id = src_host.id();
         let src_host_event_id = src_host.get_new_event_id();
+
+        if src_host_id != dst_host_id {
+            Worker::update_lowest_used_latency(delay);
+        }
 
         if destination_shard != current_shard {
             let remote_event = RemotePacketEvent::new(

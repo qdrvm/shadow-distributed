@@ -285,12 +285,7 @@ impl<'a> Manager<'a> {
         let bootstrap_end_time: SimulationTime = bootstrap_end_time.try_into().unwrap();
         let bootstrap_end_time = EmulatedTime::SIMULATION_START + bootstrap_end_time;
 
-        let smallest_latency = SimulationTime::from_nanos(
-            manager_config
-                .routing_info
-                .get_smallest_latency_ns()
-                .unwrap(),
-        );
+        let smallest_latency = SimulationTime::from_nanos(manager_config.smallest_host_latency_ns);
 
         let parallelism: usize = match self.config.general.parallelism.unwrap() {
             0 => {
@@ -469,6 +464,7 @@ impl<'a> Manager<'a> {
                     });
 
                 // run the events
+                let local_execution_start = std::time::Instant::now();
                 scheduler.scope(|s| {
                     // run the closure on each of the scheduler's threads
                     s.run_with_data(
@@ -520,6 +516,9 @@ impl<'a> Manager<'a> {
                         time_of_last_usage_check = current_time;
                         self.check_resource_usage();
                     }
+                });
+                worker::with_global_sim_stats(|stats| {
+                    stats.record_distributed_local_execution_time(local_execution_start.elapsed())
                 });
 
                 // The default exchange preserves single-shard behavior by requiring that no remote
@@ -888,6 +887,9 @@ pub struct ManagerConfig {
     // cross-shard packet exchange backend
     pub remote_packet_exchange: Box<dyn RemotePacketExchange>,
 
+    // smallest latency between distinct configured hosts
+    pub smallest_host_latency_ns: u64,
+
     // a list of hosts and their processes
     pub hosts: Vec<HostInfo>,
 }
@@ -898,6 +900,14 @@ impl ManagerConfig {
         shard_id: ShardId,
         remote_packet_exchange: Box<dyn RemotePacketExchange>,
     ) -> Self {
+        let smallest_host_latency_ns = sim_config
+            .routing_info
+            .get_smallest_latency_ns_between_hosts(
+                sim_config.hosts.iter().map(|host| host.network_node_id),
+            )
+            .or_else(|| sim_config.routing_info.get_smallest_latency_ns())
+            .unwrap();
+
         let hosts = sim_config
             .hosts
             .into_iter()
@@ -918,6 +928,7 @@ impl ManagerConfig {
             partition_map: sim_config.partition_map,
             dns_hosts: sim_config.dns_hosts,
             remote_packet_exchange,
+            smallest_host_latency_ns,
             hosts,
         }
     }

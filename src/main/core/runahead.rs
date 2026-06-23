@@ -15,8 +15,7 @@ pub struct Runahead {
     /// The lowest packet latency that shadow has used so far in the simulation. For performance, is
     /// only updated if dynamic runahead is enabled for the simulation.
     min_used_latency: RwLock<Option<SimulationTime>>,
-    /// The lowest latency that's possible in the simulation (the graph edge with the lowest
-    /// latency).
+    /// The lowest latency that's possible between distinct configured hosts.
     min_possible_latency: SimulationTime,
     /// A lower bound for the runahead as specified by the user.
     min_runahead_config: Option<SimulationTime>,
