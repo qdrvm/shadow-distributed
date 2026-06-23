@@ -149,11 +149,6 @@ impl SharedSimStats {
             add_duration_ns(distributed.mpi_alltoallv_payload_time_ns, duration);
     }
 
-    pub fn record_mpi_alltoallv_payload_skipped(&self) {
-        let mut distributed = self.distributed.lock().unwrap();
-        distributed.mpi_alltoallv_payload_skipped_count += 1;
-    }
-
     pub fn record_mpi_packet_exchange_shape(
         &self,
         send_bytes: usize,
@@ -248,7 +243,6 @@ pub struct DistributedSimStats {
     pub mpi_alltoall_sizes_time_ns: u64,
     pub mpi_alltoallv_payload_count: u64,
     pub mpi_alltoallv_payload_time_ns: u64,
-    pub mpi_alltoallv_payload_skipped_count: u64,
     pub mpi_packet_exchange_round_count: u64,
     pub mpi_packet_exchange_empty_send_round_count: u64,
     pub mpi_packet_exchange_empty_recv_round_count: u64,

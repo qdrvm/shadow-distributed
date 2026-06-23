@@ -119,6 +119,59 @@ Results:
   wall-clock with 6,215 packet-exchange rounds per shard, faster than the manual
   12ms override and much faster than vanilla Shadow for this scenario.
 
+## Correctness review and fixes (post-merge)
+
+A review of the merged distributed code found two issues that could hang the
+simulation or produce wrong results; both are now fixed.
+
+### Fixed: MPI_Alltoallv collective could deadlock
+- The `f6c42c469` optimization skipped `MPI_Alltoallv` when a rank's *local*
+  `send_total == 0 && recv_total == 0`. `MPI_Alltoallv` is collective over
+  `MPI_COMM_WORLD`, so any round where some shards exchange packets while at least
+  one shard is locally idle would hang the busy ranks while the idle rank returned
+  early.
+- Fix: removed the local-only skip in `src/main/core/distributed.rs`. The
+  globally-idle round is still handled by the existing 1-byte dummy buffers. The
+  redundant `mpi_alltoallv_payload_skipped_count` metric was dropped from
+  `sim_stats.rs` (the equivalent locally-empty count is already recorded by
+  `mpi_packet_exchange_empty_payload_round_count`).
+
+### Fixed: dynamic runahead is unsafe in distributed mode
+- Each shard observes only its local hosts' latencies, so per-shard
+  `min_used_latency` can diverge, producing different execution windows and breaking
+  cross-shard event ordering (and the per-round global-min collective).
+- Fix: `src/main/shadow.rs` now hard-errors when
+  `distributed_shard_count > 1 && use_dynamic_runahead == true` (not feature-gated;
+  applies to every distributed backend). Default `use_dynamic_runahead` is `false`,
+  so normal runs are unaffected. The static runahead floor is still globally
+  consistent (computed over the global host list in `manager.rs`).
+
+### Cluster validation of the fixes
+- 4-node safety run (1 host/shard — the idle-shard pattern that exercised the
+  deadlock) completes in ~3s with no hang.
+- 64-node main run completes in ~477s, on par with the ~487s baseline, confirming
+  the removed `Alltoallv` skip cost nothing.
+- The dynamic-runahead guard rejects the unsupported combination in ~1s on all ranks.
+- With `model_unblocked_syscall_latency: false`, two distributed runs are
+  byte-identical across all four shards (run-to-run determinism). Note that the
+  ethlambda scenarios set `model_unblocked_syscall_latency: true`, which is
+  inherently non-deterministic run-to-run (microsecond timestamp drift) and is a
+  pre-existing Shadow feature, unrelated to these fixes.
+
+## Known divergence: distributed vs vanilla results
+
+- Distributed and vanilla single-process runs produce different (but each
+  internally-deterministic) chains. The cause is the runahead window size:
+  the fork's host-pair runahead excludes self-loops (12ms windows for this
+  topology) while vanilla Shadow includes them (1ms windows). Via the
+  `deliver_time = max(current_time + delay, round_end_time)` clamp in
+  `worker.rs`, loopback/same-host packets (1ms) land on different round
+  boundaries, changing application timing. Event ordering, RNG seeding, and
+  cross-shard re-injection are otherwise identical between modes.
+- A planned opt-in flag would make the fork compute runahead the vanilla way
+  (include self-loops) for bit-identical reproduction, at the cost of reverting
+  to the slower 1ms scheduling cadence.
+
 ## Notes
 
 - The local-subprocess distributed CTests from `origin/main` are still available.

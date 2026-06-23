@@ -407,14 +407,13 @@ pub(crate) mod mpi_backend {
                 )
             });
 
-            if send_total == 0 && recv_total == 0 {
-                crate::core::worker::with_global_sim_stats(|stats| {
-                    stats.record_mpi_alltoallv_payload_skipped()
-                });
-                self.pending_received.lock().unwrap().clear();
-                return Ok(());
-            }
-
+            // NOTE: Do not skip the MPI_Alltoallv below based on this rank's local
+            // send_total/recv_total. MPI_Alltoallv is a collective over MPI_COMM_WORLD;
+            // every rank must call it. A locally-idle rank cannot know whether other
+            // rank-pairs are exchanging traffic, so a local-only skip deadlocks the
+            // busy ranks. The globally-idle round (all ranks zero) is handled correctly
+            // below via the dummy one-byte buffers. (Per-round locally-empty stats are
+            // still recorded above via record_mpi_packet_exchange_shape.)
             let send_displs = displacements(&send_counts)?;
             let recv_displs = displacements(&recv_counts)?;
 

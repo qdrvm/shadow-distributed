@@ -215,6 +215,28 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         );
     }
 
+    // Dynamic runahead is unsafe in distributed mode: each shard observes only its
+    // local hosts' latencies, so its runahead can diverge from other shards. Shards
+    // would then compute different execution windows, which breaks cross-shard event
+    // ordering (a packet can arrive in a shard's past) and can desynchronize the
+    // per-round global-min collective. Reject the combination up front, before any MPI
+    // collectives are started. This guard is intentionally not feature-gated: every
+    // distributed backend (MPI and in-process/unix-socket) has the same divergence.
+    if shadow_config
+        .experimental
+        .distributed_shard_count
+        .unwrap_or(1)
+        > 1
+        && shadow_config.experimental.use_dynamic_runahead == Some(true)
+    {
+        anyhow::bail!(
+            "use_dynamic_runahead is not supported in distributed mode \
+             (distributed_shard_count > 1): per-shard runahead would diverge and break \
+             cross-shard event ordering. Disable dynamic runahead and use a fixed \
+             runahead instead."
+        );
+    }
+
     // log some information
     // Initialize MPI if running in distributed MPI mode.
     #[cfg(feature = "distributed_mpi")]
