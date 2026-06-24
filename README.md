@@ -26,6 +26,9 @@
 > `model_unblocked_syscall_latency: false`; distributed then matches single-process **and**
 > upstream vanilla Shadow byte-for-byte. Note:
 > `native_preemption_enabled: true` is documented to break determinism.
+>
+> See [`docs/distributed_shadow.md`](docs/distributed_shadow.md) for the full guide (build,
+> configuration, running on a cluster, metrics, architecture, and troubleshooting).
 
 ## Quickstart
 
