@@ -24,7 +24,7 @@
 >
 > For bit-identical / reproducible runs set `native_preemption_enabled: false` and
 > `model_unblocked_syscall_latency: false`; distributed then matches single-process **and**
-> upstream vanilla Shadow byte-for-byte (verified on a 16-node ethlambda devnet). Note:
+> upstream vanilla Shadow byte-for-byte. Note:
 > `native_preemption_enabled: true` is documented to break determinism.
 
 ## Quickstart
