@@ -574,6 +574,7 @@
         <div class="meta">
           <span class="badge done">built: MPI backend</span>
           <span class="badge done">tested: 64 ethlambda nodes</span>
+          <span class="badge done">verified: distributed == vanilla, bit-for-bit</span>
           <span class="badge warn">sim time: 120 seconds</span>
           <span class="badge info">case study: distributed vs vanilla</span>
         </div>
@@ -1024,7 +1025,87 @@ decode bytes, inject packets into local event queues</pre>
           <span><span class="dot" style="background: var(--evolved)"></span>future protocol work</span>
         </div>
       </div>
-      <p>The current frontier is clear: in the optimized 64-node distributed run, aggregate <code>MPI_Alltoall</code> size-exchange time was about 2,224 seconds across ranks. That does not mean the wall clock was 2,224 seconds; it means ranks collectively spent a lot of waiting time in that operation. The next serious improvement likely needs fewer synchronization rounds or a smarter exchange protocol.</p>
+      <p>The current frontier is clear: in the optimized 64-node distributed run, aggregate <code>MPI_Alltoall</code> size-exchange time was about 2,224 seconds across ranks. That does not mean the wall clock was 2,224 seconds; it means ranks collectively spent a lot of waiting time in that operation. The next serious improvement likely needs fewer synchronization rounds or a smarter exchange protocol &mdash; but the single biggest win came from a different direction entirely: the scheduling window itself.</p>
+    </section>
+
+    <div class="divider"><span class="mark">[runahead]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>The bigger lever: the runahead window</h2>
+      <p class="lead">The MPI tuning mattered, but the real unlock was not in MPI at all. It was in <em>how far each shard may run before it must stop and synchronize</em> &mdash; the runahead window.</p>
+      <div class="two-col">
+        <div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag evolve">evolved</span><h3>Runahead = smallest inter-host latency</h3></div>
+            <p>Within one window every shard runs its hosts in parallel. To stay causal, the window can be at most the smallest latency between two distinct hosts &mdash; then any cross-host packet always lands in a <em>future</em> window. Bigger window means fewer synchronization rounds, which means faster.</p>
+          </div>
+          <div class="decision">
+            <div class="decision-head"><span class="tag chose">chose</span><h3>Exclude self-loops: <code>use_host_pair_runahead</code></h3></div>
+            <p>The only sub-12ms edges in our topology are <strong>self-loops</strong> (a host's own loopback / local API, ~1ms). Those constrain one host's internal traffic, not cross-shard scheduling. Excluding them grows the window from ~1ms to ~12ms &mdash; roughly 12&times; fewer rounds. The value is computed automatically from each topology; it is never hardcoded.</p>
+          </div>
+        </div>
+        <div class="callout">
+          <strong>One flag, two regimes</strong>
+          <p><code>use_host_pair_runahead: true</code> (default) gives the fast ~12ms cadence. Set it <code>false</code> to include self-loops and use the ~1ms window &mdash; exactly matching vanilla Shadow's timing: slower, but bit-for-bit reproducible (see below). A separate guard rejects <code>use_dynamic_runahead</code> in distributed mode, where a per-shard shrinking window would break cross-shard ordering.</p>
+        </div>
+      </div>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="num">894s</div>
+          <div class="label">distributed, ~1ms window</div>
+          <small>64-node run after the MPI optimizations, default vanilla-style runahead.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">487s</div>
+          <div class="label">distributed, host-pair window</div>
+          <small>Same run with <code>use_host_pair_runahead</code>: ~12ms window, ~12&times; fewer rounds.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">868s</div>
+          <div class="label">vanilla Shadow</div>
+          <small>Now <em>slower</em> than optimized distributed for this 64-node workload.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">~1.8&times;</div>
+          <div class="label">distributed now faster</div>
+          <small>The runahead window, not MPI, was the dominant lever.</small>
+        </div>
+      </div>
+    </section>
+
+    <div class="divider"><span class="mark">[determinism]</span></div>
+
+    <section class="section wrap reveal">
+      <h2>Can distributed reproduce vanilla, bit for bit?</h2>
+      <p class="lead">The deepest question for a deterministic simulator: does sharding change the answer? After a long hunt the result is clean &mdash; <strong>distributed, single-process, and upstream vanilla Shadow produce byte-identical output</strong>, once one scenario setting is fixed.</p>
+      <div class="decision">
+        <div class="decision-head"><span class="tag warn">gotcha</span><h3>The real determinism breaker: <code>native_preemption_enabled</code></h3></div>
+        <p>Generated scenarios set <code>native_preemption_enabled: true</code>. Shadow's own docs say it <em>"breaks simulation determinism"</em>: it interrupts long pure-CPU code (here, hash-sig signing) based on <strong>real</strong> CPU time and advances simulated time by a fixed amount &mdash; inherently non-repeatable. It is a stock Shadow option, so even vanilla single-process runs diverged run-to-run with it on. Not an application bug, and not a distributed bug; the cross-shard machinery was correct all along.</p>
+      </div>
+      <div class="metrics">
+        <div class="metric-card">
+          <div class="num">16/16</div>
+          <div class="label">single == single</div>
+          <small>Two single-process runs, native preemption off: byte-identical across all hosts.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">16/16</div>
+          <div class="label">distributed == single</div>
+          <small>4 shards vs one process &mdash; identical, despite ~155k cross-shard packets per shard.</small>
+        </div>
+        <div class="metric-card">
+          <div class="num">16/16</div>
+          <div class="label">fork == upstream vanilla</div>
+          <small>Same application binary on upstream Shadow: byte-identical too.</small>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>Recipe for reproducible distributed runs</strong>
+        <p>Set <code>native_preemption_enabled: false</code>, <code>model_unblocked_syscall_latency: false</code>, and <code>use_host_pair_runahead: false</code> (to match vanilla's ~1ms window), and use the single-threaded build of your application. Then distributed == single-process == vanilla, every time. Leave <code>use_host_pair_runahead</code> at its default if you only need distributed-vs-single consistency plus the fast cadence &mdash; that holds regardless of the flag.</p>
+      </div>
+      <div class="quote">
+        <p>The thing that looked like a distributed bug was a real-time preemption knob in the scenario file.</p>
+      </div>
     </section>
 
     <section class="section wrap reveal">
@@ -1099,7 +1180,7 @@ decode bytes, inject packets into local event queues</pre>
   </main>
 
   <footer class="footer wrap">
-    Built from the actual Distributed Shadow implementation notes, MPI optimization commit <code>fa00af433</code>, and the 64-node ethlambda benchmark runs on distributed-shadow and shadow-performance. Single file. No JavaScript dependencies. Fonts from Google Fonts.
+    Built from the actual Distributed Shadow implementation notes, the MPI optimization commit <code>fa00af433</code>, the host-pair runahead + determinism work (commit <code>a5c12cc50</code>), the 64-node ethlambda benchmark runs on distributed-shadow and shadow-performance, and the 16-node bit-for-bit consistency runs. Single file. No JavaScript dependencies. Fonts from Google Fonts.
   </footer>
 
   <script>

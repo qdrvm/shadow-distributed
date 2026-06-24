@@ -1,5 +1,32 @@
 # The Shadow Simulator
 
+> **Fork notice — Distributed Shadow.** This is a fork of upstream
+> [Shadow](https://github.com/shadow/shadow) that adds **distributed execution**: a single
+> deterministic simulation can be sharded across multiple physical machines via **MPI**, so
+> experiments that outgrow one host can scale out. Each MPI rank owns a shard (a partition of
+> the simulated hosts); cross-shard packets are exchanged as timestamped events through MPI
+> collectives, preserving Shadow's simulated time and event ordering.
+>
+> **Build:** `cmake -S . -B build -DSHADOW_USE_MPI=ON -DCMAKE_BUILD_TYPE=Release` (needs OpenMPI).
+> **Run:** `mpirun -np <ranks> --hostfile <hosts> build/src/main/shadow --parallelism <n> shadow.yaml`,
+> with `experimental.distributed_shard_count` and `experimental.distributed_partition_file`
+> (the host→shard map) set in the config.
+>
+> Distributed / experimental options added by this fork:
+> - **`distributed_shard_count`**, **`distributed_partition_file`** — enable sharding and
+>   pin each host to a shard. (Multi-shard mode also needs `experimental.use_new_tcp: true`.)
+> - **`use_host_pair_runahead`** (default `true`) — compute the runahead window from the
+>   smallest latency between *distinct* hosts (fast, ~12× fewer scheduling rounds). Set `false`
+>   to include self-loops and use vanilla Shadow's smaller window, reproducing its chain
+>   bit-for-bit. The value is derived from the topology automatically; it is never hardcoded.
+> - **`use_dynamic_runahead`** is rejected in distributed mode (a per-shard shrinking window
+>   would break cross-shard event ordering).
+>
+> For bit-identical / reproducible runs set `native_preemption_enabled: false` and
+> `model_unblocked_syscall_latency: false`; distributed then matches single-process **and**
+> upstream vanilla Shadow byte-for-byte (verified on a 16-node ethlambda devnet). Note:
+> `native_preemption_enabled: true` is documented to break determinism.
+
 ## Quickstart
 
 After installing the [dependencies](https://shadow.github.io/docs/guide/install_dependencies.html): build, test, and install Shadow into `~/.local`:
