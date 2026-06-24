@@ -325,6 +325,47 @@ All ranks must be able to resolve and reach each other via MPI. Check that
 mpirun -np 2 --host node1,node2 hostname
 ```
 
+### SSH errors or unreachable cluster nodes
+
+MPI uses SSH to bootstrap the job: `mpirun` SSHes into each node listed in the
+hostfile to start a daemon, which then `exec`s the Shadow binary. This happens
+**once at launch**, before the simulation starts. MPI is all-or-nothing — if any
+node is unreachable, the entire job is aborted.
+
+**Hard failure (node down, SSH refused, or key rejected):**
+OpenMPI cannot start its daemon on the node and aborts the whole launch:
+
+```
+ORTE was unable to reliably start one or more daemons.
+```
+
+or a more specific PLM/ssh message naming the failing host.
+
+**Soft failure (passwordless SSH not configured):**
+If SSH prompts for a password, `mpirun` hangs waiting for input that never comes.
+This is the same symptom as "hangs at startup" above, but the root cause is a
+missing or unloaded SSH key rather than a network issue.
+
+**Pre-flight check** — verify every node is reachable and passwordless before
+launching Shadow:
+
+```bash
+# Each invocation should print the hostname immediately with no password prompt.
+for host in node1 node2 node3 node4; do
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" hostname
+done
+```
+
+Or with `mpirun` directly:
+
+```bash
+mpirun -np 4 --hostfile hostfile hostname
+```
+
+If any node is unavailable, Shadow will not start. Fix connectivity before
+retrying. Shadow itself has no node-liveness logic; all such errors surface
+through MPI's launcher.
+
 ### "requires experimental.use_new_tcp=true"
 
 Add `experimental: { use_new_tcp: true }` to your YAML config, or pass
