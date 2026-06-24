@@ -404,7 +404,10 @@ impl Worker {
         let src_host_id = src_host.id();
         let src_host_event_id = src_host.get_new_event_id();
 
-        if src_host_id != dst_host_id {
+        // Self-loop (same-host) latencies are excluded from dynamic runahead under the
+        // host-pair optimization; when it is disabled, include them to match vanilla.
+        let use_host_pair_runahead = Worker::with(|w| w.shared.use_host_pair_runahead).unwrap();
+        if !use_host_pair_runahead || src_host_id != dst_host_id {
             Worker::update_lowest_used_latency(delay);
         }
 
@@ -541,6 +544,9 @@ pub struct WorkerShared {
     pub num_plugin_errors: AtomicU32,
     // calculates the runahead for the next simulation round
     pub runahead: Runahead,
+    // if true, self-loop (same-host) latencies do not feed dynamic runahead (host-pair
+    // optimization); if false, all latencies do, matching vanilla single-process Shadow
+    pub use_host_pair_runahead: bool,
     pub child_pid_watcher: ChildPidWatcher,
     /// Event queues for each host. This should only be used to push packet events.
     pub event_queues: HashMap<HostId, Arc<Mutex<EventQueue>>>,

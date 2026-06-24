@@ -285,7 +285,14 @@ impl<'a> Manager<'a> {
         let bootstrap_end_time: SimulationTime = bootstrap_end_time.try_into().unwrap();
         let bootstrap_end_time = EmulatedTime::SIMULATION_START + bootstrap_end_time;
 
-        let smallest_latency = SimulationTime::from_nanos(manager_config.smallest_host_latency_ns);
+        // With use_host_pair_runahead (default), runahead ignores self-loop paths for
+        // throughput. Disabling it falls back to the smallest latency over all paths,
+        // matching vanilla single-process Shadow for bit-identical results.
+        let smallest_latency = if self.config.experimental.use_host_pair_runahead.unwrap() {
+            SimulationTime::from_nanos(manager_config.smallest_host_latency_ns)
+        } else {
+            SimulationTime::from_nanos(manager_config.smallest_path_latency_ns)
+        };
 
         let parallelism: usize = match self.config.general.parallelism.unwrap() {
             0 => {
@@ -389,6 +396,7 @@ impl<'a> Manager<'a> {
                     smallest_latency,
                     min_runahead_config,
                 ),
+                use_host_pair_runahead: self.config.experimental.use_host_pair_runahead.unwrap(),
                 child_pid_watcher: ChildPidWatcher::new(),
                 event_queues: hosts
                     .iter()
@@ -887,8 +895,11 @@ pub struct ManagerConfig {
     // cross-shard packet exchange backend
     pub remote_packet_exchange: Box<dyn RemotePacketExchange>,
 
-    // smallest latency between distinct configured hosts
+    // smallest latency between distinct configured hosts (host-pair runahead)
     pub smallest_host_latency_ns: u64,
+
+    // smallest latency over all paths, including self-loops (matches vanilla Shadow)
+    pub smallest_path_latency_ns: u64,
 
     // a list of hosts and their processes
     pub hosts: Vec<HostInfo>,
@@ -907,6 +918,10 @@ impl ManagerConfig {
             )
             .or_else(|| sim_config.routing_info.get_smallest_latency_ns())
             .unwrap();
+
+        // smallest latency over all paths (including self-loops), as vanilla Shadow uses.
+        // Selected at runahead-construction time when use_host_pair_runahead is disabled.
+        let smallest_path_latency_ns = sim_config.routing_info.get_smallest_latency_ns().unwrap();
 
         let hosts = sim_config
             .hosts
@@ -929,6 +944,7 @@ impl ManagerConfig {
             dns_hosts: sim_config.dns_hosts,
             remote_packet_exchange,
             smallest_host_latency_ns,
+            smallest_path_latency_ns,
             hosts,
         }
     }

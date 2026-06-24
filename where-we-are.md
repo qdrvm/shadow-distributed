@@ -158,19 +158,75 @@ simulation or produce wrong results; both are now fixed.
   inherently non-deterministic run-to-run (microsecond timestamp drift) and is a
   pre-existing Shadow feature, unrelated to these fixes.
 
-## Known divergence: distributed vs vanilla results
+## Distributed vs vanilla consistency (RESOLVED — see flag section below)
 
-- Distributed and vanilla single-process runs produce different (but each
-  internally-deterministic) chains. The cause is the runahead window size:
-  the fork's host-pair runahead excludes self-loops (12ms windows for this
-  topology) while vanilla Shadow includes them (1ms windows). Via the
-  `deliver_time = max(current_time + delay, round_end_time)` clamp in
-  `worker.rs`, loopback/same-host packets (1ms) land on different round
-  boundaries, changing application timing. Event ordering, RNG seeding, and
-  cross-shard re-injection are otherwise identical between modes.
-- A planned opt-in flag would make the fork compute runahead the vanilla way
-  (include self-loops) for bit-identical reproduction, at the cost of reverting
-  to the slower 1ms scheduling cadence.
+- Earlier hypothesis (now known to be incomplete): distributed and vanilla
+  single-process runs were thought to diverge solely because of runahead window
+  size — the fork's host-pair runahead excludes self-loops (12ms windows) while
+  vanilla includes them (1ms windows), so loopback/same-host packets land on
+  different round boundaries via the
+  `deliver_time = max(current_time + delay, round_end_time)` clamp in `worker.rs`.
+- Reality (established with the `use_host_pair_runahead` flag + the determinism
+  investigation below): the dominant cause of run-to-run *non-determinism* was
+  `native_preemption_enabled: true`, not runahead. Once native preemption is off
+  and runahead matches, distributed == single-process == upstream vanilla
+  **bit-for-bit**. The runahead flag only governs whether the fork reproduces
+  upstream vanilla's specific chain (1ms) or runs the fast 12ms cadence.
+
+### `use_host_pair_runahead` flag — implemented and tested (16-node ethlambda)
+
+- Added `experimental.use_host_pair_runahead` (default `true` = fast host-pair
+  runahead; `false` = vanilla runahead over all paths incl. self-loops). Wired in
+  `configuration.rs`, `manager.rs` (selects `smallest_path_latency_ns` when off),
+  and `worker.rs` (self-loop dynamic-runahead filter follows the flag).
+- Validation scenario: a self-consistent **16-validator** ethlambda devnet
+  (`main-120s-16nodes`, 4 hosts/shard × 4 shards), built by trimming the 64-node
+  genesis. The network produces a block every slot and finalizes.
+
+#### ROOT CAUSE of run-to-run nondeterminism: `native_preemption_enabled: true`
+
+- The generated ethlambda scenarios set `experimental.native_preemption_enabled: true`.
+  Shadow's own docs (`configuration.rs:519-524`) state this "**breaks simulation
+  determinism**": it preempts long-running managed code based on *real* CPU time and
+  advances simulated time by a fixed amount, which is inherently nondeterministic.
+  ethlambda's hash-sig signing is a long pure-CPU computation that triggers it.
+- Confirmed empirically (16-validator devnet, `model_unblocked_syscall_latency: false`,
+  same single-threaded ethlambda binary `md5 26a8f800…` on all nodes):
+  - **native preemption ON** → two *single-process* runs are NOT identical (block
+    roots diverge from slot 5). So is upstream vanilla Shadow (also nondeterministic
+    with native preemption on). This is NOT an ethlambda bug and NOT a fork bug.
+  - **native preemption OFF** → two single-process runs are **byte-identical**
+    (16/16 hosts, head `53b43b03`, finalized_slot=11).
+  - **native preemption OFF**, distributed (4 shards, flag off) vs single-process
+    (flag off): **byte-identical, 16/16 hosts.** Full cross-shard MPI exchange
+    (~155k packets/shard) preserves bit-identity.
+- **Conclusion (corrected):** the fork's distributed scheduler and cross-shard
+  delivery are **correct and consistency-preserving** — distributed == single-process
+  bit-for-bit once native preemption is off. The earlier "residual cross-shard
+  divergence" finding was an artifact of `native_preemption_enabled: true`, not a
+  distributed-mode problem. For deterministic/reproducible runs, generate scenarios
+  with `native_preemption_enabled: false` (or pass `--native-preemption-enabled false`).
+- The ethlambda binary on the cluster is the correct single-threaded shadow build
+  (`make shadow-build`); the multi-threaded default build differs and would also be
+  nondeterministic. (jemalloc symbols are present via `jemalloc_pprof` in both builds
+  and are not a reliable build discriminator.)
+
+#### Full consistency matrix (native preemption OFF, `model_unblocked_syscall_latency: false`)
+
+All comparisons below are per-host `ethlambda.1000.stdout` md5 over all 16 hosts:
+
+- **upstream-vanilla (single) == fork (single) == fork (distributed, 4 shards)** —
+  **16/16 byte-identical** with flag off (1 ms runahead in all three; vanilla's
+  default also 1 ms). head `53b43b03`, finalized_slot=11.
+- flag **on** (12 ms runahead): distributed == single **16/16 byte-identical** too
+  (a different but internally-consistent chain than the 1 ms case; faster).
+- So: (a) the fork's distributed mode reproduces single-process bit-for-bit
+  regardless of the flag value; (b) the flag governs whether the fork matches
+  *upstream vanilla's* runahead window (off = 1 ms = vanilla; on = 12 ms = fast);
+  (c) the rand-crate version difference (fork 0.8.5 vs upstream 0.9.x) does **not**
+  cause divergence for this workload — fork and upstream are byte-identical once
+  native preemption is off and runahead matches. The prior-session "vanilla differs"
+  observation was an artifact of native preemption being on (and/or runahead mismatch).
 
 ## Notes
 

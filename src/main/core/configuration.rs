@@ -424,6 +424,17 @@ pub struct ExperimentalOptions {
     #[clap(help = EXP_HELP.get("use_dynamic_runahead").unwrap().as_str())]
     pub use_dynamic_runahead: Option<bool>,
 
+    /// Compute runahead from the smallest latency between distinct hosts, ignoring
+    /// self-loop (same-host) paths. This improves scheduling throughput, but changes the
+    /// delivery time of sub-runahead-latency packets (e.g. loopback), so results diverge
+    /// from vanilla single-process Shadow. Set to false to compute runahead over all
+    /// paths including self-loops, exactly matching vanilla Shadow for bit-identical
+    /// results (at the cost of more, smaller scheduling rounds).
+    #[clap(hide_short_help = true)]
+    #[clap(long, value_name = "bool")]
+    #[clap(help = EXP_HELP.get("use_host_pair_runahead").unwrap().as_str())]
+    pub use_host_pair_runahead: Option<bool>,
+
     /// Initial size of the socket's send buffer
     #[clap(hide_short_help = true)]
     #[clap(long, value_name = "bytes")]
@@ -585,6 +596,7 @@ impl Default for ExperimentalOptions {
                 units::TimePrefix::Milli,
             ))),
             use_dynamic_runahead: Some(false),
+            use_host_pair_runahead: Some(true),
             socket_send_buffer: Some(units::Bytes::new(131_072, units::SiPrefixUpper::Base)),
             socket_send_autotune: Some(true),
             socket_recv_buffer: Some(units::Bytes::new(174_760, units::SiPrefixUpper::Base)),
