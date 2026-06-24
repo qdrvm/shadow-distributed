@@ -143,6 +143,22 @@ node3 slots=4
 node4 slots=4
 ```
 
+Each entry is the **hostname or IP address of a physical machine** in your cluster,
+followed by `slots=N` — the number of MPI ranks (Shadow shards) to run on that machine.
+Replace `node1`, `node2`, etc. with your actual machine names or IPs:
+
+```
+# hostfile (example with real names)
+worker-01.example.com slots=4
+worker-02.example.com slots=4
+192.168.1.12          slots=4
+192.168.1.13          slots=4
+```
+
+MPI uses SSH to launch Shadow processes on each listed host. The machine running
+`mpirun` must be able to SSH passwordlessly into every host in the file, and the
+Shadow binary must exist at the same path (or be in `$PATH`) on every machine.
+
 Then launch:
 
 ```bash
